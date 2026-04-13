@@ -4,6 +4,8 @@ FROM node:22-alpine AS deps
 RUN apk add --no-cache libc6-compat
 WORKDIR /app
 COPY package.json package-lock.json ./
+# postinstall 会执行 sync 脚本；须先于 npm ci 放入脚本（容器内无 monorepo 的 supersplat/ 时脚本会安全跳过）
+COPY scripts/sync-supersplat-editor.mjs scripts/sync-supersplat-editor.mjs
 RUN npm ci
 
 FROM node:22-alpine AS builder
