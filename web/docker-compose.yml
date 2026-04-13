@@ -1,0 +1,11 @@
+# 用法：在 `web/` 目录执行 `docker compose up -d --build`
+# 左侧为宿主机端口（默认 3001，避免与本机已占用的 3000 冲突），右侧为容器内 Next 监听端口 3000。
+# 反代 tsthinker.tech 时把 upstream 指到 host 的该端口即可。
+
+services:
+  web:
+    build: .
+    image: synthetic-eye-web:latest
+    ports:
+      - "3001:3000"
+    restart: unless-stopped

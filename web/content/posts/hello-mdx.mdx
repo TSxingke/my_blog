@@ -1,0 +1,37 @@
+---
+title: MDX 流水线已就绪
+date: "2026-04-11"
+description: 验证 Markdown、代码高亮与数学公式。
+hidden: true
+tags:
+  - MDX
+  - 博客
+---
+
+这是一篇用于验证 **MDX** 渲染的短文。
+
+## 代码块
+
+```ts
+export const DEFAULT_SPLAT_PATH = "/bike_splat.splat";
+```
+
+## 数学公式（块级）
+
+欧拉恒等式：
+
+$$
+e^{i\pi} + 1 = 0
+$$
+
+高斯积分：
+
+$$
+\int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}
+$$
+
+## 嵌入 SuperSplat
+
+默认加载路径由 `lib/supersplat-editor.ts` 中 `DEFAULT_SUPERPLAT_MODEL` 配置；也可在 MDX 中指定：
+
+<SuperSplatViewer url="/bike_splat.splat" />

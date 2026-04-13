@@ -1,0 +1,88 @@
+@import "tailwindcss";
+
+:root {
+  --neon-cyan: #00fcff;
+  --bg-dark: #060b12;
+  --bg-panel: rgba(8, 16, 26, 0.72);
+  --text-main: #ecf4ff;
+  --text-muted: #9aa7b6;
+  /* 全局底纹偏中性灰，避免与 Hero 点云抢戏 */
+  --grid-line: rgba(120, 128, 140, 0.06);
+  --background: var(--bg-dark);
+  --foreground: var(--text-main);
+  /* 系统栈：不请求 Google Fonts，无网服务器 / CI 亦可构建 */
+  --font-inter: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans SC",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-jetbrains-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco,
+    Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-jetbrains-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-inter);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    radial-gradient(circle at 22% 18%, rgba(0, 252, 255, 0.045), transparent 32%);
+  background-size:
+    36px 36px,
+    36px 36px,
+    auto;
+}
+
+.glass-panel {
+  background: var(--bg-panel);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(0, 252, 255, 0.32);
+  box-shadow:
+    0 0 18px rgba(0, 252, 255, 0.14),
+    inset 0 0 12px rgba(0, 252, 255, 0.08);
+}
+
+.neon-title {
+  color: var(--neon-cyan);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.article-prose table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.article-prose th,
+.article-prose td {
+  border: 1px solid rgba(34, 211, 238, 0.22);
+  padding: 0.5rem 0.75rem;
+  vertical-align: top;
+}
+
+.article-prose th {
+  background: rgba(8, 51, 68, 0.45);
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.article-prose .katex-display {
+  overflow-x: auto;
+  padding: 0.75rem 0;
+}
+
+.article-prose [data-rehype-pretty-code-figure] pre {
+  margin-bottom: 0;
+}
+
+.article-prose [data-rehype-pretty-code-title] {
+  margin-bottom: 0.35rem;
+  font-family: var(--font-jetbrains-mono), ui-monospace, monospace;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}

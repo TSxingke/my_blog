@@ -1,0 +1,22 @@
+---
+title: Phase 4 媒体与性能验证
+date: "2026-04-12"
+description: 图片懒加载、正文内媒体与性能相关说明（测试文）。
+hidden: true
+tags:
+  - 博客
+  - 性能
+---
+
+本篇用于 **Phase 4** 自检：MDX 内图片走 `loading="lazy"`，不阻塞首屏 LCP；首页精选区视频仍由 `ShowcaseVideo` 负责悬停播放。
+
+## 正文内图片（懒加载）
+
+以下为 `public` 内资源，用于验证 MDX `img` 映射：
+
+![站点头像占位演示](/avatar.jpg)
+
+## 说明
+
+- 图片由 `lib/mdx-components.tsx` 中 `img` 组件统一增加 `loading="lazy"`、`decoding="async"`。
+- 建议在 Markdown 中为重要大图补充 `width` / `height` 或宽高属性，以进一步降低 CLS。

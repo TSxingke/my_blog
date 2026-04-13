@@ -1,0 +1,18 @@
+# Cursor 本地会话（不必进仓库）
+.specstory/
+
+# Supersplat 源码体积大；部署依赖已提交的 web/public/supersplat-editor
+supersplat/
+
+# Next 应用
+web/node_modules/
+web/.next/
+web/.next-dev-alt/
+web/out/
+web/.env
+web/.env.*
+web/*.tsbuildinfo
+web/npm-debug.log*
+
+.DS_Store
+*.pem
