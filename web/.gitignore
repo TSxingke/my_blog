@@ -18,8 +18,8 @@
 /.next-dev-alt/
 /out/
 
-# supersplat-editor 可由 `npm run sync:supersplat-editor` 从 ../supersplat/dist 生成；
-# 为便于仅克隆本仓库时在服务器 Docker 内 `npm ci`，将构建结果一并纳入版本控制。
+# 由 npm run sync:supersplat-editor 从 ../supersplat/dist 生成
+/public/supersplat-editor/
 
 # production
 /build
