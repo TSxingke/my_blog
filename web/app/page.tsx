@@ -8,7 +8,7 @@ import { SiteIcpFooter } from "@/components/layout/SiteIcpFooter";
 import { getAllPostsSorted } from "@/lib/posts";
 
 /** 放在 `public/` 下的多视角雨天演示视频（文件名以你本地为准）。 */
-const SHOWCASE_VIDEO_SRC = "/multiview_rainy.mp4";
+const SHOWCASE_VIDEO_SRC = "/multiview_rainy_small.mp4";
 
 const navItems = [
   { label: "首页", href: "/" },
