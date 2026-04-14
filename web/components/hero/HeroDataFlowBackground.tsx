@@ -8,10 +8,9 @@ import {
   type ReactNode,
 } from "react";
 
-const NEON = "#00fcff";
-/** 底层网格+连线略淡；粒子单独一层可略亮，合起来仍偏背景感 */
+/** 底层网格+连线略淡；粒子单独一层（略提高不透明度，在毛玻璃等叠层下仍可见） */
 const GRID_LAYER_OPACITY = 0.1;
-const PARTICLE_LAYER_OPACITY = 0.2;
+const PARTICLE_LAYER_OPACITY = 0.38;
 
 const PARTICLE_COUNT = 400;
 
@@ -22,15 +21,15 @@ const REPULSE_DIST2 = REPULSE_DIST * REPULSE_DIST;
 const MOVE_SPEED = 0.5;
 
 /** 散开时长（略长，便于铺满全屏后再进入下一轮聚拢） */
-const CYCLE_SCATTER_MS = 12800;
+const CYCLE_SCATTER_MS = 21000;
 /** 至少聚拢这么久才允许判定爆开（避免一开始误爆） */
-const MIN_GATHER_MS = 2200;
+const MIN_GATHER_MS = 2800;
 /** 最久等成环；超时强制爆开防止卡死 */
-const MAX_GATHER_MS = 11000;
+const MAX_GATHER_MS = 12800;
 /** 落在环目标附近的粒子占比 ≥ 此值则视为可爆 */
 const RING_READY_FRAC = 0.66;
 /** 用于弹簧/环旋转进度归一（与原先固定聚拢段同量级） */
-const GATHER_CURVE_MS = 5600;
+const GATHER_CURVE_MS = 6400;
 
 /** 空间划分单元：略小于连线距离，查 3×3 邻格即可覆盖 LINK_DIST */
 const GRID_CELL = 80;
@@ -51,8 +50,8 @@ type Particle = {
 
 function rollKind(): ParticleKind {
   const u = Math.random();
-  if (u < 0.03) return "cyan";
-  return u < 0.515 ? "white" : "dark";
+  if (u < 0.045) return "cyan";
+  return u < 0.62 ? "white" : "dark";
 }
 
 const REGION_FR = 0.3;
@@ -139,21 +138,44 @@ function bounceParticle(p: Particle, w: number, h: number) {
   }
 }
 
+/** 两端都贴在同一条「边附近」时不画连线，避免沿周界连成一条亮线 */
+function bothNearSameScreenEdge(
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  w: number,
+  h: number,
+  margin: number,
+): boolean {
+  return (
+    (ay < margin && by < margin) ||
+    (ay > h - margin && by > h - margin) ||
+    (ax < margin && bx < margin) ||
+    (ax > w - margin && bx > w - margin)
+  );
+}
+
 function strokeLink(
   a: Particle,
   b: Particle,
   ctx: CanvasRenderingContext2D,
   ox: number,
   oy: number,
+  w: number,
+  h: number,
 ) {
+  const margin = Math.min(w, h) * 0.065;
+  if (bothNearSameScreenEdge(a.x, a.y, b.x, b.y, w, h, margin)) return;
+
   const dx = b.x - a.x;
   const dy = b.y - a.y;
   const d2 = dx * dx + dy * dy;
   if (d2 >= LINK_DIST2 || d2 <= 4) return;
   const d = Math.sqrt(d2);
   const t = 1 - d / LINK_DIST;
-  const linkA = 0.038 + t * 0.09;
-  ctx.strokeStyle = `rgba(255, 255, 255, ${linkA})`;
+  const linkA = 0.055 + t * 0.09;
+  ctx.strokeStyle = `rgba(220, 232, 245, ${linkA})`;
   ctx.beginPath();
   ctx.moveTo(a.x + ox, a.y + oy);
   ctx.lineTo(b.x + ox, b.y + oy);
@@ -212,13 +234,13 @@ function drawLinksSpatial(
             for (let ii = 0; ii < listA.length; ii++) {
               const ai = listA[ii];
               for (let jj = ii + 1; jj < listB.length; jj++) {
-                strokeLink(parts[ai], parts[listB[jj]], ctx, ox, oy);
+                strokeLink(parts[ai], parts[listB[jj]], ctx, ox, oy, w, h);
               }
             }
           } else {
             for (const ai of listA) {
               for (const bi of listB) {
-                strokeLink(parts[ai], parts[bi], ctx, ox, oy);
+                strokeLink(parts[ai], parts[bi], ctx, ox, oy, w, h);
               }
             }
           }
@@ -228,7 +250,7 @@ function drawLinksSpatial(
   }
 }
 
-/** 单层实心点，避免多层光晕叠成灰雾 */
+/** 单层实心点：偏亮、偏冷灰，不叠 shadow/渐变，避免糊成光晕 */
 function drawParticleCrisp(
   ctx: CanvasRenderingContext2D,
   px: number,
@@ -238,17 +260,17 @@ function drawParticleCrisp(
 ) {
   ctx.globalAlpha = 1;
   if (kind === "cyan") {
-    ctx.fillStyle = NEON;
+    ctx.fillStyle = "#7afeff";
     ctx.beginPath();
-    ctx.arc(px, py, r * 1.08, 0, Math.PI * 2);
+    ctx.arc(px, py, r * 1.02, 0, Math.PI * 2);
     ctx.fill();
   } else if (kind === "white") {
-    ctx.fillStyle = "#eef3fb";
+    ctx.fillStyle = "#f6f9ff";
     ctx.beginPath();
     ctx.arc(px, py, r, 0, Math.PI * 2);
     ctx.fill();
   } else {
-    ctx.fillStyle = "#9aa6b8";
+    ctx.fillStyle = "#b9c6d8";
     ctx.beginPath();
     ctx.arc(px, py, r, 0, Math.PI * 2);
     ctx.fill();
@@ -437,7 +459,7 @@ export function HeroDataFlowBackground({
 
     const wander = inGather
       ? 0.032
-      : 0.038 + scatterU * scatterU * 0.055;
+      : 0.038 + scatterU * scatterU * 0.072;
     const steer = inGather
       ? 0.032
       : 0.011 + scatterU * scatterU * 0.052;
@@ -479,6 +501,20 @@ export function HeroDataFlowBackground({
         }
       }
 
+      /** 散开阶段：靠边粒子加随机扰动 + 极弱向心扩散，打散「贴边一条线」、更均匀 */
+      if (!inGather) {
+        const band = Math.min(w, h) * 0.08;
+        const dn = Math.min(p.x, p.y, w - p.x, h - p.y);
+        if (dn < band) {
+          const u = 1 - dn / band;
+          const j = 0.05 * u * (0.55 + scatterU * 0.5);
+          p.vx += (Math.random() - 0.5) * j;
+          p.vy += (Math.random() - 0.5) * j;
+          p.vx += ((cx - p.x) / Math.max(w, h)) * 0.0014 * u;
+          p.vy += ((cy - p.y) / Math.max(w, h)) * 0.0014 * u;
+        }
+      }
+
       p.baseAngle += (Math.random() - 0.5) * wander;
       const targetVx = Math.cos(p.baseAngle) * MOVE_SPEED;
       const targetVy = Math.sin(p.baseAngle) * MOVE_SPEED;
@@ -505,9 +541,9 @@ export function HeroDataFlowBackground({
       if (!Number.isFinite(p.vy)) p.vy = 0;
     }
 
-    drawLinksSpatial(parts, ctxGrid, w, h, ox, oy);
-
     ctxParticle.clearRect(0, 0, w, h);
+    /** 连线与粒子同层（粒子层不透明度更高）；若在网格层画线会被 GRID_LAYER_OPACITY 压暗 */
+    drawLinksSpatial(parts, ctxParticle, w, h, ox, oy);
     for (const p of parts) {
       drawParticleCrisp(
         ctxParticle,

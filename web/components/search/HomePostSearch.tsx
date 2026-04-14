@@ -29,13 +29,13 @@ export function HomePostSearch({ posts }: Props) {
         type="search"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
-        className="w-full rounded-lg border border-cyan-300/30 bg-black/20 px-3 py-2 text-sm outline-none placeholder:text-[var(--text-muted)] focus:border-cyan-300/70"
+        className="w-full rounded-lg border border-cyan-300/44 bg-black/20 px-3 py-2 text-sm outline-none placeholder:text-[var(--text-muted)] focus:border-cyan-300/70"
         placeholder="搜索文章…"
         aria-label="搜索文章"
         autoComplete="off"
       />
       {hasQuery ? (
-        <div className="mt-2 rounded-lg border border-cyan-300/25 bg-black/35 p-2 text-xs">
+        <div className="mt-2 rounded-lg border border-cyan-300/38 bg-black/35 p-2 text-xs">
           {hits.length === 0 ? (
             <p className="px-1 py-2 text-[var(--text-muted)]">无匹配文章</p>
           ) : (
@@ -54,7 +54,7 @@ export function HomePostSearch({ posts }: Props) {
           )}
           <Link
             href={listHref}
-            className="mt-2 block border-t border-cyan-400/15 pt-2 text-center font-mono text-cyan-200/90 hover:text-cyan-100 hover:underline"
+            className="mt-2 block border-t border-cyan-400/26 pt-2 text-center font-mono text-cyan-200/90 hover:text-cyan-100 hover:underline"
           >
             在文章列表中查看全部结果 →
           </Link>

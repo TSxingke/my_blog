@@ -35,7 +35,7 @@ export default function Home() {
               alt="头像"
               width={96}
               height={96}
-              className="mb-4 h-24 w-24 rounded-full border-2 border-cyan-300/35 object-cover shadow-[0_0_20px_rgba(0,252,255,0.15)]"
+              className="mb-4 h-24 w-24 rounded-full border-2 border-cyan-300/48 object-cover shadow-[0_0_20px_rgba(0,252,255,0.15)]"
               priority
             />
             <h1 className="neon-title text-2xl font-semibold">Synthetic Eye</h1>
@@ -48,13 +48,13 @@ export default function Home() {
               <Link
                 key={item.label}
                 href={item.href}
-                className="block rounded-lg border border-transparent px-3 py-2 text-[var(--text-main)] transition hover:border-cyan-300/50 hover:bg-cyan-400/10"
+                className="block rounded-lg border border-transparent px-3 py-2 text-[var(--text-main)] transition hover:border-cyan-300/62 hover:bg-cyan-400/10"
               >
                 {item.label}
               </Link>
             ))}
           </nav>
-          <div className="mt-auto flex flex-col gap-3 border-t border-cyan-300/20 pt-4 font-mono text-xs text-[var(--text-muted)]">
+          <div className="mt-auto flex flex-col gap-3 border-t border-cyan-300/32 pt-4 font-mono text-xs text-[var(--text-muted)]">
             <a
               href="https://github.com/TSxingke"
               target="_blank"
@@ -85,13 +85,13 @@ export default function Home() {
             <section className="glass-panel flex min-h-0 min-w-0 flex-1 flex-col rounded-2xl p-6">
               <p className="neon-title mb-3 text-xs">精选展示</p>
               <div className="grid min-h-[17.5rem] flex-1 gap-4 lg:grid-cols-2">
-                <div className="flex min-h-[14rem] flex-col overflow-hidden rounded-xl border border-cyan-300/25 bg-black/30 p-4">
+                <div className="flex min-h-[14rem] flex-col overflow-hidden rounded-xl border border-cyan-300/52 bg-black/30 p-4 shadow-[0_0_22px_rgba(0,252,255,0.2)]">
                   <p className="font-mono text-sm tracking-wide text-[var(--text-main)]">3DGS</p>
                   <div className="mt-3 flex min-h-[14rem] flex-1 flex-col">
                     <SuperSplatIframe className="min-h-0 flex-1 rounded-lg" />
                   </div>
                 </div>
-                <div className="flex min-h-[14rem] flex-col overflow-hidden rounded-xl border border-cyan-300/50 bg-black/30 p-4 shadow-[0_0_20px_rgba(0,252,255,0.2)]">
+                <div className="flex min-h-[14rem] flex-col overflow-hidden rounded-xl border border-cyan-300/52 bg-black/30 p-4 shadow-[0_0_22px_rgba(0,252,255,0.2)]">
                   <p className="font-mono text-sm tracking-wide text-[var(--text-main)]">Cosmos世界模型</p>
                   <div className="mt-3 flex min-h-[14rem] flex-1 items-center justify-center overflow-hidden rounded-lg bg-black">
                     <ShowcaseVideo src={SHOWCASE_VIDEO_SRC} />
@@ -108,7 +108,7 @@ export default function Home() {
                 {trendingTags.map((tag) => (
                   <span
                     key={tag}
-                    className="rounded-full border border-cyan-300/35 px-2 py-1"
+                    className="rounded-full border border-cyan-300/48 px-2 py-1"
                   >
                     {tag}
                   </span>
@@ -122,7 +122,7 @@ export default function Home() {
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
               {posts.map(({ slug, meta }) => (
                 <Link key={slug} href={`/posts/${slug}`} className="block">
-                  <article className="h-full rounded-xl border border-cyan-300/25 bg-black/25 p-4 transition hover:-translate-y-0.5 hover:border-cyan-300/60">
+                  <article className="h-full rounded-xl border border-cyan-300/38 bg-black/25 p-4 transition hover:-translate-y-0.5 hover:border-cyan-300/72">
                     <h2 className="font-semibold">{meta.title}</h2>
                     <p className="mt-1 text-xs text-[var(--text-muted)]">{meta.date}</p>
                     <p className="mt-2 line-clamp-3 text-sm text-[var(--text-muted)]">

@@ -45,7 +45,7 @@ export default async function PostsIndexPage({ searchParams }: Props) {
           <li key={slug}>
             <Link
               href={`/posts/${slug}`}
-              className="block rounded-xl border border-cyan-400/20 bg-black/25 p-4 transition hover:border-cyan-400/50"
+              className="block rounded-xl border border-cyan-400/34 bg-black/25 p-4 transition hover:border-cyan-400/62"
             >
               <span className="text-lg font-medium text-[var(--text-main)]">{meta.title}</span>
               <div className="mt-1 flex flex-wrap gap-2 text-sm text-[var(--text-muted)]">

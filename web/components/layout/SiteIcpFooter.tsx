@@ -3,7 +3,7 @@
  */
 export function SiteIcpFooter() {
   return (
-    <footer className="border-t border-cyan-400/15 bg-black/25 px-4 py-5 text-center text-xs text-[var(--text-muted)] backdrop-blur-sm">
+    <footer className="border-t border-cyan-400/28 bg-black/25 px-4 py-5 text-center text-xs text-[var(--text-muted)] backdrop-blur-sm">
       <p>
         <a
           href="https://beian.miit.gov.cn/"

@@ -44,7 +44,7 @@ export const mdxComponents: MDXComponents = {
     />
   ),
   table: ({ children, className, ...rest }) => (
-    <div className="my-4 w-full overflow-x-auto rounded-lg border border-cyan-400/25 bg-black/30">
+    <div className="my-4 w-full overflow-x-auto rounded-lg border border-cyan-400/38 bg-black/30">
       <table
         className={[
           "w-full min-w-[280px] border-collapse text-left text-sm text-[var(--text-main)]",
@@ -66,7 +66,7 @@ export const mdxComponents: MDXComponents = {
   th: ({ className, ...rest }) => (
     <th
       className={[
-        "border border-cyan-400/30 bg-cyan-950/45 px-3 py-2 text-left font-semibold text-cyan-50/95",
+        "border border-cyan-400/44 bg-cyan-950/45 px-3 py-2 text-left font-semibold text-cyan-50/95",
         className,
       ]
         .filter(Boolean)
@@ -77,7 +77,7 @@ export const mdxComponents: MDXComponents = {
   td: ({ className, ...rest }) => (
     <td
       className={[
-        "border border-cyan-400/20 px-3 py-2 align-top text-[var(--text-main)]/95",
+        "border border-cyan-400/32 px-3 py-2 align-top text-[var(--text-main)]/95",
         className,
       ]
         .filter(Boolean)
@@ -87,14 +87,14 @@ export const mdxComponents: MDXComponents = {
   ),
   blockquote: (props) => (
     <blockquote
-      className="mb-4 border-l-2 border-cyan-400/60 bg-cyan-400/5 py-2 pl-4 text-[var(--text-muted)]"
+      className="mb-4 border-l-2 border-cyan-400/72 bg-cyan-400/5 py-2 pl-4 text-[var(--text-muted)]"
       {...props}
     />
   ),
-  hr: () => <hr className="my-10 border-cyan-400/20" />,
+  hr: () => <hr className="my-10 border-cyan-400/32" />,
   img: ({ alt, className, ...rest }) => (
     <img
-      className={["my-4 max-h-[min(70vh,720px)] w-auto max-w-full rounded-lg border border-cyan-400/20", className]
+      className={["my-4 max-h-[min(70vh,720px)] w-auto max-w-full rounded-lg border border-cyan-400/32", className]
         .filter(Boolean)
         .join(" ")}
       decoding="async"
@@ -116,16 +116,16 @@ export const mdxComponents: MDXComponents = {
     return <code {...props} />;
   },
   pre: (props) => (
-    <pre className="mb-4 overflow-x-auto rounded-lg border border-cyan-400/25 bg-black/50 p-4 text-sm shadow-[0_0_12px_rgba(0,252,255,0.08)]" {...props} />
+    <pre className="mb-4 overflow-x-auto rounded-lg border border-cyan-400/38 bg-black/50 p-4 text-sm shadow-[0_0_14px_rgba(0,252,255,0.12)]" {...props} />
   ),
   SuperSplatIframe: (props: { modelPath?: string | null }) => (
-    <div className="my-6 overflow-hidden rounded-xl border border-cyan-400/30 shadow-[0_0_20px_rgba(0,252,255,0.12)]">
+    <div className="my-6 overflow-hidden rounded-xl border border-cyan-400/44 shadow-[0_0_22px_rgba(0,252,255,0.16)]">
       <SuperSplatIframe modelPath={props.modelPath} className="aspect-video min-h-[280px]" />
     </div>
   ),
   /** PRD 命名：`url` / `contentUrl` 均作为模型路径传给 `?load=`（与 3DGS_Study 一致）。 */
   SuperSplatViewer: (props: { url?: string; contentUrl?: string | null }) => (
-    <div className="my-6 overflow-hidden rounded-xl border border-cyan-400/30 shadow-[0_0_20px_rgba(0,252,255,0.12)]">
+    <div className="my-6 overflow-hidden rounded-xl border border-cyan-400/44 shadow-[0_0_22px_rgba(0,252,255,0.16)]">
       <SuperSplatIframe
         modelPath={props.contentUrl ?? props.url}
         className="aspect-video min-h-[280px]"

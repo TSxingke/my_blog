@@ -35,7 +35,7 @@ export default async function PostPage({ params }: Props) {
       >
         ← 返回文章列表
       </Link>
-      <header className="mb-10 border-b border-cyan-400/15 pb-8">
+      <header className="mb-10 border-b border-cyan-400/28 pb-8">
         <p className="neon-title mb-2 text-xs">文章</p>
         <h1 className="text-3xl font-semibold tracking-tight">{post.meta.title}</h1>
         <div className="mt-3 flex flex-wrap gap-2 text-sm text-[var(--text-muted)]">
