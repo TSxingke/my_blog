@@ -18,7 +18,14 @@ const navItems = [
   { label: "简历", href: "#" },
 ];
 
-const trendingTags = ["#3DGS", "#CARLA", "#ROS2", "#SLAM", "#DataSynthesis"];
+const trendingTags = [
+  "#3DGS",
+  "#CARLA",
+  "#ROS2",
+  "#SLAM",
+  "#DataSynthesis",
+  "#世界模型",
+];
 
 export default function Home() {
   const allPosts = getAllPostsSorted();

@@ -1,4 +1,5 @@
 import type { MDXComponents } from "mdx/types";
+import { ImagePlaceholder } from "@/components/mdx/ImagePlaceholder";
 import { SuperSplatIframe } from "@/components/splat/SuperSplatIframe";
 
 export const mdxComponents: MDXComponents = {
@@ -117,6 +118,9 @@ export const mdxComponents: MDXComponents = {
   },
   pre: (props) => (
     <pre className="mb-4 overflow-x-auto rounded-lg border border-cyan-400/38 bg-black/50 p-4 text-sm shadow-[0_0_14px_rgba(0,252,255,0.12)]" {...props} />
+  ),
+  ImagePlaceholder: (props: { caption?: string; idea?: string }) => (
+    <ImagePlaceholder caption={props.caption} idea={props.idea} />
   ),
   SuperSplatIframe: (props: { modelPath?: string | null }) => (
     <div className="my-6 overflow-hidden rounded-xl border border-cyan-400/44 shadow-[0_0_22px_rgba(0,252,255,0.16)]">
