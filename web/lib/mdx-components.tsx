@@ -14,7 +14,7 @@ export const mdxComponents: MDXComponents = {
   ),
   p: (props) => <p className="mb-4 leading-relaxed text-[var(--text-main)]/95" {...props} />,
   a: (props) => (
-    <a className="text-cyan-300 underline-offset-2 hover:underline" {...props} />
+    <a className="mdx-prose-link text-cyan-300 underline-offset-2 hover:underline" {...props} />
   ),
   ul: ({ className, ...rest }) => {
     const isTask = className?.includes("contains-task-list");
@@ -45,7 +45,7 @@ export const mdxComponents: MDXComponents = {
     />
   ),
   table: ({ children, className, ...rest }) => (
-    <div className="my-4 w-full overflow-x-auto rounded-lg border border-cyan-400/38 bg-black/30">
+    <div className="mdx-table-wrap my-4 w-full overflow-x-auto rounded-lg border border-cyan-400/38 bg-black/30">
       <table
         className={[
           "w-full min-w-[280px] border-collapse text-left text-sm text-[var(--text-main)]",
@@ -109,7 +109,7 @@ export const mdxComponents: MDXComponents = {
     if (inline) {
       return (
         <code
-          className="rounded bg-black/40 px-1.5 py-0.5 font-mono text-sm text-cyan-100"
+          className="mdx-inline-code rounded bg-black/40 px-1.5 py-0.5 font-mono text-sm text-cyan-100"
           {...props}
         />
       );
@@ -117,7 +117,7 @@ export const mdxComponents: MDXComponents = {
     return <code {...props} />;
   },
   pre: (props) => (
-    <pre className="mb-4 overflow-x-auto rounded-lg border border-cyan-400/38 bg-black/50 p-4 text-sm shadow-[0_0_14px_rgba(0,252,255,0.12)]" {...props} />
+    <pre className="mdx-pre-wrap mb-4 overflow-x-auto rounded-lg border border-cyan-400/38 bg-black/50 p-4 text-sm shadow-[0_0_14px_rgba(0,252,255,0.12)]" {...props} />
   ),
   ImagePlaceholder: (props: { caption?: string; idea?: string }) => (
     <ImagePlaceholder caption={props.caption} idea={props.idea} />

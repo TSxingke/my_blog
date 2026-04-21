@@ -28,20 +28,22 @@ export default async function PostPage({ params }: Props) {
   const { content } = await compilePostMdx(post.body);
 
   return (
-    <article>
+    <article className="post-reading-article">
       <Link
         href="/posts"
-        className="mb-8 inline-block text-sm text-cyan-300/90 hover:text-cyan-200 hover:underline"
+        className="post-reading-back mb-8 inline-block text-sm text-cyan-300/90 hover:text-cyan-200 hover:underline"
       >
         ← 返回文章列表
       </Link>
-      <header className="mb-10 border-b border-cyan-400/28 pb-8">
+      <header className="post-reading-head mb-10 border-b border-cyan-400/28 pb-8">
         <p className="neon-title mb-2 text-xs">文章</p>
-        <h1 className="text-3xl font-semibold tracking-tight">{post.meta.title}</h1>
-        <div className="mt-3 flex flex-wrap gap-2 text-sm text-[var(--text-muted)]">
-          <time dateTime={post.meta.date}>{post.meta.date}</time>
+        <h1 className="post-reading-title text-3xl font-semibold tracking-tight text-[var(--text-main)]">
+          {post.meta.title}
+        </h1>
+        <div className="post-reading-meta mt-3 flex flex-wrap gap-2 text-sm text-[var(--text-muted)]">
+          <time dateTime={String(post.meta.date)}>{String(post.meta.date)}</time>
           {post.meta.tags?.map((t) => (
-            <span key={t} className="font-mono text-cyan-200/80">
+            <span key={t} className="post-reading-tag font-mono text-cyan-200/80">
               #{t}
             </span>
           ))}

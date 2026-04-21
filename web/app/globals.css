@@ -86,3 +86,117 @@ body {
   font-size: 0.75rem;
   color: var(--text-muted);
 }
+
+/* ---------- 文章详情：浅色阅读（仅 data-post-reading-theme="light" 作用域） ---------- */
+.post-reading-root[data-post-reading-theme="light"] {
+  --text-main: #152030;
+  --text-muted: #5a6b7c;
+  --neon-cyan: #0d9488;
+}
+
+.post-reading-root[data-post-reading-theme="light"] .post-reading-surface {
+  border-color: rgba(100, 116, 139, 0.4);
+  background: rgba(255, 252, 248, 0.97);
+  box-shadow:
+    0 12px 48px rgba(15, 23, 42, 0.1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.85);
+}
+
+.post-reading-root[data-post-reading-theme="light"] .post-reading-back {
+  color: #0f766e;
+}
+.post-reading-root[data-post-reading-theme="light"] .post-reading-back:hover {
+  color: #0d9488;
+}
+
+.post-reading-root[data-post-reading-theme="light"] .post-reading-head {
+  border-color: rgba(148, 163, 184, 0.45);
+}
+
+.post-reading-root[data-post-reading-theme="light"] .post-reading-tag {
+  color: rgba(13, 148, 136, 0.9);
+}
+
+.post-reading-root[data-post-reading-theme="light"] .mdx-prose-link {
+  color: #0d9488;
+}
+.post-reading-root[data-post-reading-theme="light"] .mdx-prose-link:hover {
+  color: #0f766e;
+}
+
+.post-reading-root[data-post-reading-theme="light"] .mdx-table-wrap {
+  border-color: rgb(203 213 225);
+  background: rgb(248 250 252);
+}
+
+.post-reading-root[data-post-reading-theme="light"] .article-prose th {
+  border-color: rgb(203 213 225);
+  background: rgb(241 245 249);
+  color: var(--text-main);
+}
+
+.post-reading-root[data-post-reading-theme="light"] .article-prose td {
+  border-color: rgb(226 232 240);
+}
+
+.post-reading-root[data-post-reading-theme="light"]
+  .article-prose
+  tbody
+  tr:nth-child(even) {
+  background: rgb(248 250 252);
+}
+
+.post-reading-root[data-post-reading-theme="light"] .article-prose blockquote {
+  border-color: rgba(13, 148, 136, 0.45) !important;
+  background: rgba(13, 148, 136, 0.06) !important;
+  color: var(--text-muted) !important;
+}
+
+.post-reading-root[data-post-reading-theme="light"] .article-prose hr {
+  border-color: rgb(203 213 225);
+}
+
+.post-reading-root[data-post-reading-theme="light"] .mdx-inline-code {
+  background: rgb(241 245 249);
+  color: #0f172a;
+}
+
+.post-reading-root[data-post-reading-theme="light"] .mdx-pre-wrap {
+  border-color: rgb(203 213 225);
+  box-shadow: 0 0 14px rgba(15, 23, 42, 0.08);
+}
+
+.post-reading-root[data-post-reading-theme="light"] .article-prose img {
+  border-color: rgb(203 213 225);
+}
+
+.post-reading-root[data-post-reading-theme="light"] figure[class*="border-dashed"] {
+  border-color: rgba(13, 148, 136, 0.4) !important;
+  background: rgb(248 250 252) !important;
+}
+
+.post-reading-root[data-post-reading-theme="light"] figure[class*="border-dashed"] [class*="cyan-300"] {
+  color: #0f766e !important;
+}
+
+/* 悬浮切换按钮：深浅背景下都易读 */
+.post-reading-theme-btn {
+  border-color: rgba(34, 211, 238, 0.45);
+  background: rgba(6, 11, 18, 0.82);
+  color: #e0f7ff;
+}
+.post-reading-theme-btn:hover {
+  border-color: rgba(34, 211, 238, 0.65);
+  background: rgba(6, 11, 18, 0.92);
+}
+
+.post-reading-root[data-post-reading-theme="light"] .post-reading-theme-btn {
+  border-color: rgba(13, 148, 136, 0.4);
+  background: rgba(255, 255, 255, 0.92);
+  color: #115e59;
+  box-shadow: 0 4px 20px rgba(15, 23, 42, 0.12);
+}
+.post-reading-root[data-post-reading-theme="light"] .post-reading-theme-btn:hover {
+  border-color: rgba(13, 148, 136, 0.55);
+  background: #fff;
+}

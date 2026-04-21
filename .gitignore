@@ -16,3 +16,7 @@ web/npm-debug.log*
 
 .DS_Store
 *.pem
+
+# 文章配图在部署机本地放入 public/post1；仓库只跟踪目录（见 post1/.gitkeep）
+web/public/post1/*
+!web/public/post1/.gitkeep

@@ -1,16 +1,15 @@
 ---
-title: 在自家 Ubuntu 上「捏雪球、抛雪球」：3D Gaussian Splatting 部署与实践札记
+title: 3D Gaussian Splatting 部署与实践札记 - Ubuntu
 description: 记录 3DGS 环境搭建、子模块踩坑、抽帧与显存优化，以及数据采集与训练命令的个人经验。
-date: "2026-04-20"
+date: "2026-04-21"
 tags:
   - 3DGS
   - Gaussian Splatting
-  - COLMAP
   - Ubuntu
   - PyTorch
 ---
 
-> **文风说明**：本文力求在表述上严谨（版本号、命令、因果尽量写清楚），语气上稍微活泼一点——毕竟三维重建已经够掉头发了，读文档就别再像读判决书了。若你喜欢那种「边吐槽边把事办完」的调子，可以参考这篇 CSDN 随笔的节奏感：[TSthinker 的博客示例](https://blog.csdn.net/TSthinker/article/details/127170764?fromshare=blogdetail&sharetype=blogdetail&sharerId=127170764&sharerefer=PC&sharesource=&sharefrom=from_link)（不是逐句模仿，只是借一点「人话」的温度）。
+> **博客说明**：该文章主要用于记录ubuntu系统上部署运行（自制数据集）原版3DGS，衍生的其他处理如导入UE等会在其余博客介绍。
 
 ## 先聊两句：3DGS 在干什么？
 
@@ -23,14 +22,11 @@ tags:
 
 想快速建立画面感，推荐这支 B 站视频（讲解节奏友好）：[3D Gaussian Splatting 相关视频](https://www.bilibili.com/video/BV1zi421v7Dr/?spm_id_from=333.337.search-card.all.click)。
 
-<ImagePlaceholder
-  caption="示意图：高斯椭球 → splat → 图像"
-  idea="建议放一张官方或自制示意图：左侧为三维高斯点云/椭球，中间为 splat 到屏幕，右侧为合成图像。若版权敏感，可用自己训练的简单场景截图代替。"
-/>
+![示意图：高斯椭球 → splat → 图像](/post1/pic1.jpg)
 
 ---
 
-## 我的环境（照抄前请核对驱动与 CUDA 匹配）
+## 我的环境 
 
 | 项目 | 版本 / 说明 |
 |------|-------------|
@@ -41,7 +37,7 @@ tags:
 | PyTorch | 2.4.1（与 CUDA 11.8 对应的官方轮子） |
 | COLMAP | 3.8 |
 
-**小纸条**：COLMAP **不要**在 conda 里顺手 `conda install` 糊弄过去——和系统路径、CUDA、以及后续和 `convert.py` 的衔接，经常是玄学问题的源头。按官方/系统包方式装好，终端里 `colmap -h` 能跑再说。
+**小纸条**：COLMAP **不要**在 conda 里顺手 `conda install` ——和系统路径、CUDA、以及后续和 `convert.py` 的衔接，经常是玄学问题的源头。按官方/系统包方式装好，终端里 `colmap -h` 能跑再说。
 
 ---
 
@@ -52,20 +48,15 @@ tags:
 - **处理方式**：改用 Inria 的 GitLab 源：  
   `https://gitlab.inria.fr/bkerbl/simple-knn`
 
-另外，编译子模块时请**确认使用 g++-11**（或至少在文档里把这件事写死，避免「在我机器上能编」）。不同 GCC 对 C++/CUDA 扩展的行为差异，足够让你在深夜怀疑人生。
-
-<ImagePlaceholder
-  caption="终端截图：成功编译 simple-knn / diff-gaussian-rasterization"
-  idea="截一张 `pip install` 或 `python setup.py install` 成功结束的终端输出即可，给后来者一点心理安慰。"
-/>
+另外，编译子模块时请**确认使用 g++-11**（或至少在文档里把这件事写死，避免「在我机器上能编」）。不同 GCC 对 C++/CUDA 扩展的行为存在差异，g++-12无法编译成功。
 
 ---
 
-## 我动过的两处代码
+## 代码修改：视频帧抽取和显存优化
 
 ### 1. 视频转图像：自己写 `extract_frames.py`
 
-仓库自带的视频转图像流程在我这边会触发**不理想的裁切/抽帧行为**（具体症状略去五百字，总之结果不对）。我单独写了一个 `extract_frames.py`，用 OpenCV 按帧导出 JPEG，并支持采样步长、质量等参数，避免「神秘默认行为」。
+仓库自带的视频转图像流程在我这边会触发**不理想的裁切/抽帧行为**（切成奇怪的尺寸）。我单独写了一个 `extract_frames.py`，用 OpenCV 按帧导出 JPEG，并支持采样步长、质量等参数，避免「神秘默认行为」。
 
 核心思路很简单：打开 `VideoCapture`，按需要隔帧保存，`cv2.imwrite` 时带上 JPEG 质量与渐进式选项——**可控性**比「一行 ffmpeg 魔法」更适合排错。
 
@@ -73,7 +64,7 @@ tags:
 
 ### 2. 显存：`scene/cameras.py` 不把 GT 图常驻 GPU
 
-默认实现里，真值图像会 `.to(self.data_device)`，训练时长期占用显存。若你数据集分辨率不低、批量或并行再上来一点，显存会肉眼可见地吃紧。
+默认实现里，真值图像会 `.to(self.data_device)`，训练时长期占用显存。若数据集分辨率不低、批量或并行再上来一点，显存会肉眼可见地吃紧。
 
 我把 GT 留在 CPU（默认 tensor 所在设备），需要时再搬到 GPU。对应修改如下（仅展示关键行）：
 
@@ -108,7 +99,7 @@ python train.py -s data/bike -m data/bike/output
 
 <ImagePlaceholder
   caption="训练日志：loss 与迭代步数"
-  idea="TensorBoard 或终端截图一张即可，标注大致训练时长与最终 PSNR/SSIM（若有）。"
+  idea="TensorBoard 或终端截图一张，标注大致训练时长与最终 PSNR/SSIM。（待更新）"
 />
 
 ---
@@ -123,18 +114,13 @@ python train.py -s data/bike -m data/bike/output
 
 另外，原版 3DGS **在室外**往往比**室内**更「省心」——我个人的理解是：室内材质多、反射/间接光更复杂，而室外自然光下问题更「温和」。这不是定律，只是我踩过的统计印象。
 
-<ImagePlaceholder
-  caption="对比图：室外 vs 室内训练预览"
-  idea="左右拼图：同一套流程下，室外场景与室内场景的渲染预览或点云截图，配文说明室内更难即可（注意脱敏）。"
-/>
+![对比图：室外 vs 室内训练预览](/post1/pic3.png)
 
 ---
 
 ## 小结
 
-- **原理直觉**：把 3DGS 想成「捏雪球、抛雪球」有助于建立第一印象，真要写进论文还请回到高斯参数与可微渲染的严格定义。
+- **原理直觉**：把 3DGS 想成「捏雪球、抛雪球」有助于建立第一印象，深入研究还需看高斯参数与可微渲染的严格定义。
 - **环境**：版本写清楚，COLMAP 单独装好；子模块用 GitLab 的 `simple-knn`，编译锁 **g++-11**。
 - **工程**：抽帧用可控脚本；显存紧张时考虑 GT 图不默认上 GPU，但要接受 **RAM 上升**与可能的 **PCIe 拷贝**代价。
 - **数据**：优先视角与光照条件，其次再卷分辨率（详见上文「数据采集」一节）。
-
-正式发布前，把各处的 `<ImagePlaceholder />` 换成普通 Markdown 图片语法或 `<img src="/路径" alt="说明" />` 即可。祝渲染不炸显存，COLMAP 不半夜报错。
