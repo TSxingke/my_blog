@@ -4,7 +4,11 @@
 
 services:
   web:
-    build: .
+    build:
+      context: .
+      # 国内或访问 dl-cdn 失败时取消下一行注释（或命令行传 --build-arg）：
+      # args:
+      #   ALPINE_MIRROR: https://mirrors.aliyun.com/alpine
     image: synthetic-eye-web:latest
     ports:
       - "3001:3000"

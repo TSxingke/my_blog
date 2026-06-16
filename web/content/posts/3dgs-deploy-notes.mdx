@@ -15,12 +15,12 @@ tags:
 
 如果用一句话概括 **3D Gaussian Splatting（3DGS）**：它在三维空间里摆了一堆**可学习的高斯椭球**（每个球有位置、协方差、不透明度、视角相关的颜色等），渲染时用**可微的 splatting**把这些「软乎乎的小雪球」投影到屏幕上，再用梯度下降把场景拟合出来。
 
-我更喜欢用**抛雪球**来直觉化理解（严肃读者请把下面当成比喻，不是数学定义）：
+我更喜欢用**抛雪球**来直觉化理解（下面是比喻，不是数学定义）：
 
 1. **捏雪球**：初始化/优化阶段，你在空间里「捏」出一堆高斯——它们该在哪、该扁还是圆、该多不透明，都在学。
 2. **抛雪球**：渲染阶段，把这些高斯往相机平面上「抛」过去——溅开、叠在一起，形成你看到的图像。
 
-想快速建立画面感，推荐这支 B 站视频（讲解节奏友好）：[3D Gaussian Splatting 相关视频](https://www.bilibili.com/video/BV1zi421v7Dr/?spm_id_from=333.337.search-card.all.click)。
+我推荐这支 B 站视频（讲解节奏友好）：[3D Gaussian Splatting 相关视频](https://www.bilibili.com/video/BV1zi421v7Dr/?spm_id_from=333.337.search-card.all.click)。
 
 ![示意图：高斯椭球 → splat → 图像](/post1/pic1.jpg)
 
@@ -34,21 +34,21 @@ tags:
 | 显卡驱动 | 550.144.03 |
 | CUDA / cuDNN | CUDA 11.8，cuDNN 8.9.7 |
 | Conda 环境 | Python 3.8 |
-| PyTorch | 2.4.1（与 CUDA 11.8 对应的官方轮子） |
+| PyTorch | 2.4.1 |
 | COLMAP | 3.8 |
 
-**小纸条**：COLMAP **不要**在 conda 里顺手 `conda install` ——和系统路径、CUDA、以及后续和 `convert.py` 的衔接，经常是玄学问题的源头。按官方/系统包方式装好，终端里 `colmap -h` 能跑再说。
+**提示**：COLMAP **不要**在 conda 里顺手 `conda install` ——和系统路径、CUDA、以及后续和 `convert.py` 的衔接，经常是玄学问题的源头。按官方/系统包方式装好，终端里 `colmap -h` 能跑再说。
 
 ---
 
 ## 克隆仓库之后：子模块与编译器
 
-原版 3D Gaussian Splatting 仓库依赖 `submodules` 里的几个组件。你可能会遇到第一件糟心事：**`simple-knn` 在 GitHub 上的链接已经失效**。
+原版 3D Gaussian Splatting 仓库依赖 `submodules` 里的几个组件。我遇到的一个问题：**`simple-knn` 在 GitHub 上的链接已经失效**。
 
 - **处理方式**：改用 Inria 的 GitLab 源：  
   `https://gitlab.inria.fr/bkerbl/simple-knn`
 
-另外，编译子模块时请**确认使用 g++-11**（或至少在文档里把这件事写死，避免「在我机器上能编」）。不同 GCC 对 C++/CUDA 扩展的行为存在差异，g++-12无法编译成功。
+另外，编译子模块时请**确认使用 g++-11**。不同 GCC 对 C++/CUDA 扩展的行为存在差异，g++-12无法编译成功。
 
 ---
 
@@ -58,7 +58,7 @@ tags:
 
 仓库自带的视频转图像流程在我这边会触发**不理想的裁切/抽帧行为**（切成奇怪的尺寸）。我单独写了一个 `extract_frames.py`，用 OpenCV 按帧导出 JPEG，并支持采样步长、质量等参数，避免「神秘默认行为」。
 
-核心思路很简单：打开 `VideoCapture`，按需要隔帧保存，`cv2.imwrite` 时带上 JPEG 质量与渐进式选项——**可控性**比「一行 ffmpeg 魔法」更适合排错。
+核心思路很简单：打开 `VideoCapture`，按需要隔帧保存，`cv2.imwrite` 时带上 JPEG 质量与渐进式选项——**可控性**比「一行 ffmpeg 命令」更适合排错。
 
 若你使用同一脚本，请根据项目布局把输出目录指到 COLMAP / 3DGS 期望的 `input` 结构下。
 
@@ -95,7 +95,7 @@ python convert.py -s data/bike_DJ_2/
 python train.py -s data/bike -m data/bike/output
 ```
 
-`-s` 指向场景数据，`-m` 指向输出目录。训练过程中建议同时盯着**显存占用**与**loss 曲线**，别只看 tensorboard 漂亮。
+`-s` 指向场景数据，`-m` 指向输出目录。训练过程中建议同时盯着**显存占用**与**loss 曲线**。
 
 <ImagePlaceholder
   caption="训练日志：loss 与迭代步数"
@@ -110,9 +110,9 @@ python train.py -s data/bike -m data/bike/output
 
 1. **视角覆盖与基线**：能不能把物体/场景从足够多的方向看清楚，比「单张 4K」重要得多。
 2. **运动模糊与曝光**：糊成一团的高分辨率，只是更清晰地糊。
-3. **分辨率**：在覆盖与清晰度过关的前提下，再往上加。
+3. **分辨率**：在覆盖与清晰度过关的前提下，再往上加，1080p通常是够用的。
 
-另外，原版 3DGS **在室外**往往比**室内**更「省心」——我个人的理解是：室内材质多、反射/间接光更复杂，而室外自然光下问题更「温和」。这不是定律，只是我踩过的统计印象。
+另外，原版 3DGS **在室外**往往比**室内**更「省心」——我个人的理解是：室内材质多、反射/间接光更复杂，而室外自然光下问题更「温和」。
 
 ![对比图：室外 vs 室内训练预览](/post1/pic3.png)
 

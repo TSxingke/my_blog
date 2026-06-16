@@ -1,6 +1,12 @@
 # syntax=docker/dockerfile:1
 
 FROM node:22-alpine AS deps
+# 若构建时出现 “DNS: transient error” 且 libc6-compat “no such package”，多为 APK 索引未拉取成功。
+# 可显式指定镜像，例如：docker compose build --build-arg ALPINE_MIRROR=https://mirrors.aliyun.com/alpine
+ARG ALPINE_MIRROR=
+RUN if [ -n "$ALPINE_MIRROR" ]; then \
+      sed -i "s|https://dl-cdn.alpinelinux.org/alpine|${ALPINE_MIRROR}|g" /etc/apk/repositories; \
+    fi
 RUN apk add --no-cache libc6-compat
 WORKDIR /app
 COPY package.json package-lock.json ./
