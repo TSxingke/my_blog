@@ -9,8 +9,12 @@ const eslintConfig = defineConfig([
   globalIgnores([
     // Default ignores of eslint-config-next:
     ".next/**",
+    ".next-dev-alt/**",
+    ".data/**",
     "out/**",
     "build/**",
+    "public/supersplat-editor/**",
+    "public/supersplat-viewer/**",
     "next-env.d.ts",
   ]),
 ]);

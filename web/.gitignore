@@ -16,6 +16,7 @@
 # next.js
 /.next/
 /.next-dev-alt/
+/.data/
 /out/
 
 # 由 npm run sync:supersplat-editor 从 ../supersplat/dist 生成

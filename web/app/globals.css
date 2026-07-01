@@ -179,6 +179,88 @@ body {
   color: #0f766e !important;
 }
 
+.post-like-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.post-like-button {
+  display: inline-flex;
+  min-width: 5.25rem;
+  height: 2.5rem;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  border: 1px solid rgba(34, 211, 238, 0.42);
+  border-radius: 999px;
+  background: rgba(8, 16, 26, 0.62);
+  color: rgb(207, 250, 254);
+  font-family: var(--font-jetbrains-mono), ui-monospace, monospace;
+  font-size: 0.95rem;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    color 160ms ease,
+    transform 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.post-like-button:hover:not(:disabled) {
+  border-color: rgba(34, 211, 238, 0.72);
+  background: rgba(8, 51, 68, 0.52);
+  box-shadow: 0 0 18px rgba(0, 252, 255, 0.14);
+  transform: translateY(-1px);
+}
+
+.post-like-button:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+.post-like-button-liked {
+  border-color: rgba(244, 114, 182, 0.65);
+  background: rgba(131, 24, 67, 0.24);
+  color: rgb(251, 207, 232);
+}
+
+.post-like-heart {
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
+.post-like-count {
+  min-width: 1.25rem;
+  text-align: left;
+}
+
+.post-like-error {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.post-reading-root[data-post-reading-theme="light"] .post-reading-footer {
+  border-color: rgba(148, 163, 184, 0.42);
+}
+
+.post-reading-root[data-post-reading-theme="light"] .post-like-button {
+  border-color: rgba(13, 148, 136, 0.34);
+  background: rgba(255, 255, 255, 0.8);
+  color: #115e59;
+}
+
+.post-reading-root[data-post-reading-theme="light"] .post-like-button:hover:not(:disabled) {
+  border-color: rgba(13, 148, 136, 0.56);
+  background: rgba(240, 253, 250, 0.95);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+}
+
+.post-reading-root[data-post-reading-theme="light"] .post-like-button-liked {
+  border-color: rgba(219, 39, 119, 0.45);
+  background: rgba(253, 242, 248, 0.95);
+  color: #be185d;
+}
+
 /* 悬浮切换按钮：深浅背景下都易读 */
 .post-reading-theme-btn {
   border-color: rgba(34, 211, 238, 0.45);

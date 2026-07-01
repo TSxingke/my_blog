@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getPostBySlug, getPublicPostSlugs } from "@/lib/posts";
 import { compilePostMdx } from "@/lib/compile-mdx";
+import { LikeButton } from "@/components/posts/LikeButton";
 
 type Props = { params: Promise<{ slug: string }> };
 
@@ -50,6 +51,9 @@ export default async function PostPage({ params }: Props) {
         </div>
       </header>
       <div className="article-prose">{content}</div>
+      <footer className="post-reading-footer mt-10 border-t border-cyan-400/24 pt-7">
+        <LikeButton slug={slug} />
+      </footer>
     </article>
   );
 }

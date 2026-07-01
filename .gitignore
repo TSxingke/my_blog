@@ -8,6 +8,7 @@ supersplat/
 web/node_modules/
 web/.next/
 web/.next-dev-alt/
+web/.data/
 web/out/
 web/.env
 web/.env.*
