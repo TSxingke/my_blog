@@ -19,7 +19,7 @@ export default async function PostsIndexPage({ searchParams }: Props) {
   const posts = filterPostsByQuery(allPosts, q);
 
   return (
-    <div>
+    <div className="mx-auto w-full max-w-3xl">
       <Link
         href="/"
         className="mb-8 inline-block text-sm text-cyan-300/90 hover:text-cyan-200 hover:underline"
