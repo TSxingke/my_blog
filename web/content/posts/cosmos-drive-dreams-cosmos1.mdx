@@ -1,0 +1,321 @@
+---
+title: Cosmos-Drive-Dreams：从结构化标签到自动驾驶世界生成
+description: 记录 Cosmos-Drive-Dreams 在 Cosmos-Transfer1 / Cosmos1 体系下的技术架构、SDG 工作流与本机部署实践。
+date: "2026-07-06"
+tags:
+  - Cosmos
+  - Cosmos-Drive-Dreams
+  - Cosmos-Transfer1
+  - 自动驾驶
+  - Synthetic Data
+  - 世界模型
+---
+
+> **博客说明**：这篇是我记录 Cosmos 系列的第一篇，主要围绕 **Cosmos-Drive-Dreams**。它基于 Cosmos-Transfer1 / Cosmos1 时代的模型体系。考虑到现在实际工作里已经更多转向 Cosmos2.5 和 Cosmos3，这篇不会写成完整复现手册，而是更偏向技术架构、工作流思想，以及我本机跑通流程时踩到的一些工程边界。
+
+如果一句话概括 **Cosmos-Drive-Dreams**：它不是简单“用文生视频造几段自动驾驶视频”，而是把自动驾驶场景里的 **结构化标签**（HDMap、3D 目标框、ego pose、LiDAR 等）变成可控条件，再用世界基础模型生成多样化、时空一致、可回灌下游任务训练的数据。
+
+它想解决的问题也很现实：真实自动驾驶数据很贵，长尾场景更贵。雨天、雾天、夜晚、急刹、复杂并线、非典型交通参与者，这些数据不是想采就能采，采到了也不一定有足够标注质量。Cosmos-Drive-Dreams 的路线是：**保留真实或可编辑的几何结构，用生成模型补齐外观、天气、光照和视角多样性**。
+
+我本机实际跑下来的主流程大概是：
+
+```text
+RDS-HQ 结构化数据
+  -> 渲染 HDMap / LiDAR 条件视频
+  -> Prompt Rewriting
+  -> 单视图 RGB 视频生成
+  -> 多视图扩展
+  -> 可选：新 ego 轨迹编辑与再生成
+  -> 可选：VLM 过滤与数据集回灌
+```
+
+这条链路最有意思的地方，是它把“生成”这件事拆开了：几何结构由确定性标签和渲染器负责，视觉细节由世界模型负责，多视图一致性由专门的扩展模型负责，质量控制再交给 VLM 做自动筛选。它不是指望一个 prompt 把所有事情说清楚，而是给模型搭了一套更适合自动驾驶的输入秩序。
+
+![Cosmos-Drive-Dreams 总体流程图](/post3/pic1.png)
+
+---
+
+## 先看 Cosmos-Transfer1 的架构直觉
+
+Cosmos-Drive-Dreams 的核心生成能力来自 Cosmos-Drive，而 Cosmos-Drive 又是基于 NVIDIA Cosmos-1 世界基础模型面向驾驶域做 post-training 得到的一组模型。
+
+在这个体系里，**Cosmos-Transfer1** 可以理解为“条件世界生成”分支。它的基础不是普通的图像扩散模型，而是面向视频/世界模拟的生成模型。论文里 Cosmos-Transfer1-7B-Sample-AV 采用的是 **DiT（Diffusion Transformer）** 风格的视频扩散架构：输入是 noisy video tokens，文本 prompt 作为语义条件，HDMap / LiDAR 这类结构视频则通过 ControlNet 分支注入。
+
+直觉上可以这样看：
+
+- **Base Model**：负责“世界长什么样”，也就是视频生成的主体能力。
+- **Text Prompt**：负责天气、时间、风格、场景语义，比如雨天、夜晚、雾天、城市道路。
+- **HDMap ControlNet**：负责道路几何、车道线、路口结构、交通标识、目标框等空间约束。
+- **LiDAR ControlNet**：提供更细粒度的深度和空间结构控制，可选地和 HDMap 一起使用。
+- **Tokenizer / Video Latent**：把视频压到模型能处理的 token / latent 表示里，再通过去噪过程生成最终 RGB 视频。
+
+这和普通文生视频最大的区别在于：自动驾驶数据不能只要“看起来像”。如果车道线、目标框、ego 轨迹和生成画面对不上，下游 3D lane detection、3D object detection 或 policy learning 训练会直接被污染。所以 Cosmos-Transfer1-7B-Sample-AV 的关键，不是让模型自由发挥，而是让模型在结构约束下补充真实感。
+
+论文里还有一个很重要的设计：HDMap 和 LiDAR 是分开的 ControlNet 分支，推理时可以按需要单独使用或融合。这给工程落地留了空间。只有 HDMap 时可以先跑通视觉生成；有 LiDAR 时可以进一步加强几何和深度一致性。
+
+![Cosmos-Transfer1-7B-Sample-AV 架构示意](/post3/pic2.png)
+
+我写这篇文章的时候是只想把这篇文章作为Transfer1的记录的。到 2026 年 7 月，Cosmos-Transfer1 官方仓库已经提示后续重心迁往 Cosmos3。也就是说，今天再看 Cosmos-Drive-Dreams，更有价值的是理解它的 **数据生成思想**：结构控制、prompt 多样化、单到多视图扩展、自动过滤，而不是执着于某个旧版本环境的每一个安装细节。
+
+---
+
+## 第一步：结构化标签生成条件视频
+
+Cosmos-Drive-Dreams 的入口不是 prompt，而是结构化数据。
+
+我本机跑的是 RDS-HQ 格式数据。这个格式里包含相机内外参、ego pose、HDMap、3D object bounding boxes、车辆姿态，以及可选的 LiDAR 信息。`render_from_rds_hq.py` 做的事情本质上是一个几何渲染过程：读取这些标签，把 3D 空间中的车道线、道路边界、目标框、交通灯、交通标志等元素投影到相机平面，生成后续模型可用的条件视频。
+
+这一步不依赖大模型。它更像是在告诉生成模型：**这段视频里道路应该怎么走，车应该在哪里，ego 车从哪个视角看世界**。
+
+常见命令形式类似：
+
+```bash
+python render_from_rds_hq.py \
+  -i <rds_hq_input> \
+  -o <condition_output> \
+  -d rds_hq_mv \
+  -c ftheta \
+  --skip lidar \
+  --max_chunk -1 \
+  --save_tail
+```
+
+如果只生成前视角，可以使用单视图 dataset 配置；如果后面要做六视角扩展，就需要输出多视角条件视频。这里的 `_0`、`_1` 这类 chunk 后缀也很关键，因为 Cosmos-Drive-Dreams 的示例推理通常围绕 **121 帧**片段组织。
+
+这一步给我的最大感受是：自动驾驶生成不是“凭空想象”。如果输入条件视频质量差，比如相机模型不匹配、pose 不准、HDMap 对不齐，那么后面模型再强，也是在不稳定的骨架上贴皮。
+
+<figure>
+  <div className="grid gap-3 md:grid-cols-2">
+    <img src="/post3/pic3_1.png" alt="HDMap 条件视频示例 1" />
+    <img src="/post3/pic3_2.png" alt="HDMap 条件视频示例 2" />
+  </div>
+  <figcaption>HDMap 条件视频示例</figcaption>
+</figure>
+
+如果要接入自采集数据，最麻烦的也在这里：你不能只给一段行车视频，还需要把它转换成 RDS-HQ 类似的结构。至少要有相机内参、ego pose、3D 目标框、HDMap 或等价道路矢量信息。官方工具里提供了 Waymo 到 RDS-HQ 的转换范例，这类脚本比推理命令本身更值得细看，因为它决定了真实数据能不能进入这条生成流水线。
+
+这在工程中甚至可能是比微调更大的问题，目标框和ego pose尚且可以通过自动标注和采集数据过程中获取，但是精确的HDMAP常常需要地图采集工作，成本问题值得考量。
+
+---
+
+## 第二步：Prompt Rewriting，不改骨架，只换天气和时间
+
+条件视频确定了几何结构，prompt 负责给这段结构换外观。（这里先不讨论初始的文本标注怎么生成，这部分会放在后续Cosmos2.5的微调文章中）
+
+Cosmos-Drive-Dreams 论文里使用 Qwen2.5-7B-Instruct 做 prompt rewriting；我本机实践时改成了本地 Qwen3-14B，主要是为了离线运行，避免模型下载和服务依赖上的不确定性。
+
+Prompt 改写的原则很克制：**只改环境、天气、时间，不改核心动作和空间关系**。
+
+例如一段原始 caption 描述“车辆沿城市道路行驶，前方有车辆，路侧有建筑”，prompt rewriter 可以改成：
+
+- golden hour，长阴影，暖色光照。
+- morning，清晨街道，柔和光线。
+- night，路灯和车灯主导画面。
+- rainy，湿滑路面、反光、雨幕。
+- snowy，积雪、低可见度、车辆更谨慎。
+- foggy，远处道路和车辆被雾遮挡。
+
+但它不能把“车辆直行”改成“车辆掉头”，也不能把本来没有行人的路口改成大量行人穿行。因为 HDMap 条件视频还在那里，prompt 如果和结构条件冲突，生成结果就容易出现不一致。
+
+我本机使用的改写脚本大致输出 JSON，每个原始 caption 对应多种环境版本。这个环节的价值不只是“多几个 prompt”，而是在不重新采集、不重新标注的情况下，把同一段结构变成多种长尾分布。
+
+![Prompt Rewriting 前后对比](/post3/pic4.png)
+
+这也是 Cosmos-Drive-Dreams 很像“数据飞轮”的地方：真实数据提供结构，生成模型扩展外观分布，下游模型在更多长尾样本上训练，再反过来暴露新的数据缺口。
+
+---
+
+## 第三步：单视图视频生成
+
+单视图生成是这条链路里第一次真正调用世界模型。
+
+脚本入口是：
+
+```bash
+PYTHONPATH="cosmos-transfer1" python scripts/generate_video_single_view.py \
+  --caption_path outputs/captions \
+  --input_path outputs \
+  --video_save_folder outputs/single_view \
+  --checkpoint_dir checkpoints/ \
+  --is_av_sample \
+  --controlnet_specs assets/sample_av_hdmap_spec.json
+```
+
+这里加载的主要是该权重：
+
+- `Cosmos-Transfer1-7B-Sample-AV/base_model.pt`：驾驶域 post-training 后的视频生成基座。
+
+`--controlnet_specs` 里会指定当前用哪种条件分支。只用 HDMap 时，生成结果已经能跟随车道结构和目标框；如果加入 LiDAR，则有机会获得更强的空间约束，但数据准备和显存压力也更高。
+
+从生成原理看，这一步就是条件扩散去噪：
+
+```text
+随机噪声
+  + 文本 prompt（天气、光照、语义）
+  + HDMap/LiDAR 条件视频（几何、布局、轨迹）
+  -> 121 帧前视 RGB 视频
+```
+
+我跑这一步时遇到的工程问题主要有两个。
+
+第一个是 `TransformerEngine` 和 NVRTC 版本冲突。报错里会出现 `libtransformer_engine.so` 找不到 `nvrtcGetSupportedArchs` 之类的符号。原因是系统 `LD_LIBRARY_PATH` 优先加载了旧 CUDA 里的 NVRTC，而 conda 环境里实际有更新版本。最后通过 `LD_PRELOAD` 强制预加载 conda 环境中的 `libnvrtc.so` 解决。
+
+第二个是多卡运行时的 `PYTHONPATH`。单卡命令行前面写 `PYTHONPATH=... python ...` 通常没问题，但 `torchrun` 拉起子进程时，环境变量传递容易出问题。更稳的方式是先显式 `export PYTHONPATH="cosmos-transfer1"`，再启动多卡推理。
+
+这些坑不影响理解模型本身，但它们提醒了一件事：Cosmos-Drive-Dreams 这种工程不是“pip install 完就能优雅转起来”的轻量项目。模型权重、CUDA、TransformerEngine、vLLM、torchrun、显存和磁盘都会参与进来。（另外这里NVIDIA目前已经不怎么维护该仓库了，主要还是学习下他们对自动驾驶合成数据的思路）
+
+<figure>
+  <div className="grid gap-3 md:grid-cols-2">
+    <img src="/post3/pic5_1.png" alt="单视图生成结果 1" />
+    <img src="/post3/pic5_2.png" alt="单视图生成结果 2" />
+  </div>
+  <figcaption>单视图生成结果</figcaption>
+</figure>
+
+---
+
+## 第四步：从单视图扩展到多视图
+
+自动驾驶模型通常不是只看前视摄像头。真实车端感知会使用固定 rig 的多相机输入，比如 front、cross-left、cross-right、rear-left、rear、rear-right 等视角。
+
+所以 Cosmos-Drive-Dreams 不是在六个视角上分别独立生成视频，而是使用 **Single2MultiView** 模型，把单视图结果扩展为多视角一致的视频。
+
+常见入口是：
+
+```bash
+CUDA_HOME=$CONDA_PREFIX PYTHONPATH="cosmos-transfer1" python scripts/generate_video_multi_view.py \
+  --caption_path outputs/captions \
+  --input_path outputs \
+  --input_view_path outputs/single_view \
+  --video_save_folder outputs/multi_view \
+  --checkpoint_dir checkpoints \
+  --is_av_sample \
+  --controlnet_specs assets/sample_av_hdmap_multiview_spec.json
+```
+
+它有几个输入要求：
+
+- 上一步生成的单视图 RGB 视频，作为主视角参考。
+- 多视角 HDMap 条件视频，六个视角最好齐全。
+- 多视图 ControlNet spec，对应 Single2MultiView 权重。
+- 每个视角的 prompt 扩展，例如自动追加“camera is facing to the left”这类视角描述。
+
+多视图这一步的难点不是“多生成几个视频”，而是 **一致性**。同一个路口、同一辆车、同一种天气，不能在左视角里是雨夜，右视角里变成晴天；也不能前视角有一辆车，侧视角突然消失。Single2MultiView 的意义就在于把多个视角作为一个联合生成问题处理，而不是把它们拆成六个互不相干的任务。
+
+我跑通后会得到每个视角的 mp4，也会有一个 grid 预览视频。grid 对排查很有用：单看一个视角可能觉得还行，拼在一起以后，视角间光照、车辆位置和纹理连续性的问题会更明显。
+
+![多视图 grid 预览](/post3/pic6.png)
+
+---
+
+## 第五步：Novel Ego Trajectory，让同一场景换一种走法
+
+前面的流程是“给定一段结构，生成多种外观”。Cosmos-Drive-Dreams 还有一个更偏仿真的玩法：编辑 ego 轨迹，让同一个场景从新的相机路径重新生成。
+
+> **我认为这个模块是 Cosmos 真正具备工程化价值的关键条件之一。** 前面的工作更多是在还原场景，并在还原场景的基础上修改环境；而 Novel Ego Trajectory 开始改变“车如何经过这个世界”，因此可以创造出原始数据中不存在、但对训练更有用的新样本。
+
+官方 toolkit 里提供了 `visualize_rds_hq.py`。它会启动一个 Web 可视化界面，可以逐帧观察场景结构，并手动录制新的相机位姿。大致操作是：
+
+- 用 `W/A/S/D` 和 `Q/E` 调整当前帧相机位置。
+- 用 `T` 记录当前帧 pose。
+- 用 `N` 跳到下一帧。
+- 导出 `novel_pose/<clip_id>.tar`。
+
+然后再用 `render_from_rds_hq.py` 加上 `-np novel_pose`，重新渲染这条新轨迹对应的 HDMap / LiDAR 条件视频。最后把推理脚本的 `--input_path` 指向新的条件输出目录，就可以生成“原始数据里不存在的 ego 轨迹视频”。
+
+我觉得这一步非常能体现 Cosmos-Drive-Dreams 的思想：它不是只做风格迁移，也不是只换天气，而是在结构层面先改“相机/车辆如何经过这个世界”，再让生成模型把新的视角补成真实视频。
+
+当然，这也意味着新轨迹不能随便乱画。轨迹如果违背道路几何、穿过障碍物、相机姿态剧烈跳变，条件视频本身就会不合理，生成模型也很难救。这里更像是“基于真实结构的可控再仿真”，不是游戏编辑器式的完全自由捏场景。目前我的实验结果还是比较理想的。
+
+![Novel Ego Trajectory 编辑界面](/post3/pic7.png)
+
+<figure>
+  <div className="grid gap-4 md:grid-cols-2">
+    <div>
+      <video controls preload="metadata" className="w-full rounded-md border border-white/10">
+        <source src="/post3/video_ori.mp4" type="video/mp4" />
+      </video>
+      <p className="mt-2 text-center text-sm text-[var(--text-muted)]">轨迹编辑前</p>
+    </div>
+    <div>
+      <video controls preload="metadata" className="w-full rounded-md border border-white/10">
+        <source src="/post3/video_change.mp4" type="video/mp4" />
+      </video>
+      <p className="mt-2 text-center text-sm text-[var(--text-muted)]">轨迹编辑后</p>
+    </div>
+  </div>
+  <figcaption>Novel Ego Trajectory 编辑前后生成结果对比</figcaption>
+</figure>
+
+---
+
+## 第六步：过滤、数据集，以及为什么它叫 Dreams
+
+论文完整流程最后还有 VLM rejection sampling。简单说，就是用视觉语言模型自动检查生成视频有没有明显问题，比如物体消失、形状扭曲、纹理崩坏、时序不连续等。被判定质量差的样本会丢弃，保留更适合下游训练的数据。
+
+我本机主要跑的是前面的生成链路，没有把 VLM 过滤作为重点展开。原因很简单：这一环在工程上当然重要，但它服务的是大规模数据生产。单机验证时，更重要的是先理解前面几个控制变量：结构条件、prompt、多视图、轨迹。
+
+如果把整套流程串起来，它其实是一台自动驾驶合成数据工厂：
+
+```text
+真实/标注数据提供结构
+  -> prompt rewriter 扩展天气和时间
+  -> Cosmos-Transfer1 生成单视图
+  -> Single2MultiView 生成多视角
+  -> VLM 过滤坏样本
+  -> 合成数据进入下游训练
+  -> 下游评估暴露新的长尾缺口
+  -> 再定向生成更多数据
+```
+
+这里的 “Dreams” 不是单纯“做梦”，更像是让世界模型在已有结构约束下梦出更多可能版本：同一条路可以是晴天、雨天、雪天、夜晚；同一个路口可以在新的 ego 轨迹下重新经过；同一个前视结果可以扩展成固定 rig 的多视角数据。
+
+---
+
+## 我的部署记录里，值得记的一些事
+
+这次本机部署过程里有很多细碎问题，但如果只为后续理解和迁移保留经验，我会记下面几条。
+
+**第一，数据格式比命令更重要。**  
+推理命令可以照着 README 改，但 RDS-HQ 结构、相机模型、pose、HDMap、3D box 是否对齐，才是生成结果能不能用于自动驾驶任务的根。（采集的原始数据非常重要！！）
+
+**第二，HDMap 条件视频是整条链路的骨架。**  
+Cosmos-Transfer1 的生成能力很强，但它需要可控输入。HDMap 条件视频越稳定，生成视频越有机会同时满足真实感和标注一致性。
+
+**第三，prompt rewriting 的边界要清楚。**  
+它适合扩展天气、时间、光照、环境风格，不适合随意改动作和空间结构。否则文本条件和 HDMap 条件会互相打架。
+
+**第四，单视图和多视图是两个问题。**  
+单视图关注“这个视角是否真实且贴合结构”；多视图关注“多个视角是否在同一个世界里”。后者对自动驾驶下游任务更关键。
+
+**第五，旧版本环境不值得过度恋战。**  
+Cosmos-Transfer1 / Cosmos1 的工程依赖比较重，CUDA、NVRTC、TransformerEngine、vLLM、torchrun 都可能踩坑。现在 Cosmos2.5 和 Cosmos3 已经成为更主要的方向，所以这篇更适合作为理解 Cosmos-Drive-Dreams 思路的记录，而不是鼓励在旧环境里无限打磨。
+
+---
+
+## 小结：它给我的启发
+
+Cosmos-Drive-Dreams 最打动我的地方，不是“生成视频很炫”，而是它对自动驾驶数据生成的拆解方式很清醒。
+
+它没有把所有控制都塞进一句 prompt，而是把生成任务拆成几层：
+
+- 用结构化标签保证几何和标注对齐。
+- 用 prompt 改写扩展长尾环境。
+- 用条件扩散模型生成真实视觉。
+- 用 Single2MultiView 保持多摄像头一致性。
+- 用 VLM 过滤坏样本，支撑大规模数据生产。
+
+这条路线对后来的 Cosmos2.5、Cosmos3 仍然有参考价值。模型会换，架构会进化，但物理 AI 里的一个核心问题不会变：**生成数据必须既多样，又可控；既像真实世界，又能和下游训练需要的标签对得上。**
+
+从这个角度看，Cosmos-Drive-Dreams 是一个很好的 Cosmos 系列起点。它把世界模型从“会生成视频”往“能成为自动驾驶数据飞轮的一部分”推进了一步。
+
+ps:博客经过AI+日常记录+人工修改润色，如有问题可以及时沟通。
+---
+
+## 参考资料
+
+- [Cosmos-Drive-Dreams 论文：Scalable Synthetic Driving Data Generation with World Foundation Models](https://arxiv.org/abs/2506.09042)
+- [Cosmos-Drive-Dreams 项目页](https://research.nvidia.com/labs/toronto-ai/cosmos_drive_dreams/)
+- [Cosmos-Drive-Dreams GitHub 仓库](https://github.com/nv-tlabs/Cosmos-Drive-Dreams)
+- [Cosmos-Transfer1 GitHub 仓库](https://github.com/nvidia-cosmos/cosmos-transfer1)
+- [Cosmos-Transfer1 论文：Conditional World Generation with Adaptive Multimodal Control](https://arxiv.org/abs/2503.14492)
