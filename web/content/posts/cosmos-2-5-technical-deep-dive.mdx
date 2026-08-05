@@ -1,0 +1,452 @@
+---
+title: "Cosmos 2.5 技术系列（一）：Flow Matching 与世界模型架构"
+date: "2026-08-04"
+author: "Nova"
+tags: ["cosmos2.5", "nvidia", "world-model", "physical-ai", "flow-matching", "video-generation"]
+---
+
+> **引用说明**：本文以 NVIDIA 论文 *World Simulation with Video Foundation Models for Physical AI* (arXiv:2511.00062v2, 2026) 为主要依据，文中标注 `[§x.y]` 对应论文章节。结论类型：【事实】为论文原文或一手资料直接支持，【解读】为作者基于论文事实的推断。Cosmos 3 已于 2026 年发布，本文技术分析限定于 Cosmos-Predict2.5 与 Cosmos-Transfer2.5（2025-11 提交，v2 更新于 2026-02）。
+
+---
+
+## 1. 引言：Physical AI 为什么需要世界模型
+
+Physical AI 系统——带传感器与执行器的具身智能体——需要在物理世界中完成操作任务。然而，直接在真实世界训练这类系统面临三个根本性障碍：**慢**（每次试错都需实际操作物理环境）、**贵**（硬件磨损与人工监督成本高）、**危险**（早期系统的不完美动作可能损坏自身或环境）[§1]。
+
+一个高质量的视觉世界模拟器可以充当真实世界的"安全代理"：让 Physical AI agent 先在硅基世界中学会感知和控制，再将能力迁移到真实部署。这正是 NVIDIA Cosmos 系列的根本定位。
+
+Cosmos-Predict1（2025）将开源世界基础模型（World Foundation Model, WFM）引入 Physical AI 领域（论文 §7 自述为"the first explicitly open video generation model for Physical AI"）。时隔一年，Cosmos-Predict2.5 在此基础上完成了从扩散范式到流匹配（Flow Matching）范式的跃迁。本文以 Flow Matching 为主线，串联 Cosmos 2.5 家族[^1]在数据、架构、训练与应用四个维度的技术演进。
+
+[^1]: 本文使用以下命名约定：**Cosmos 2.5 家族** = Cosmos-Predict2.5 + Cosmos-Transfer2.5 的统称；**Cosmos-Predict2.5** = 核心世界生成模型；**Cosmos-Transfer2.5** = ControlNet 风格的条件世界翻译模型；**Cosmos-Reason1** = 文本编码器。
+
+**Cosmos 1 → 2.5 的进化四维框架：**
+
+1. **范式转换**：从基于 EDM (Elucidated Diffusion Model) 的扩散模型转向 Flow Matching——模型不再沿用 EDM 的预条件去噪输出参数化，而是直接预测扩散轨迹的速度场。这一变化虽在数学形式上与 EDM 等价（Gao et al., 2025），但速度参数化带来了更平滑的优化目标与更高的样本质量 [§3.1]。
+
+2. **数据升级**：原始视频从 20M 小时扩展到 35M 小时（均为 raw video 时长口径）；七阶段过滤管线的通过率从 30% 收紧到约 4%（即从约 6B 个切分片段中保留约 200M 个可训练片段）。新增 VLM 终极过滤与在线语义去重，并显式排除游戏画面、合成动画等非物理分布数据 [§2.1]。
+
+3. **架构统一**：Text2World / Image2World / Video2World 三种生成模式并入单一模型；文本编码器从 T5 替换为 Cosmos-Reason1——一款专为 Physical AI 设计的 decoder-only VLM [§3.2]。
+
+4. **训练革新**：在渐进式预训练基础上，引入领域 SFT + 模型合并（Model Soup）+ 强化学习后训练（GRPO + VideoAlign 奖励模型）的多阶段训练配方 [§4]。
+
+由于 Cosmos 3 已经发布，本文不把具有版本时效性的榜单结果作为叙事重点，而是聚焦 Cosmos 2.5 留下的两组可复用设计：Predict2.5 如何通过 Flow Matching、数据与架构升级建立世界生成基座，以及 Transfer2.5 如何把空间条件可靠地融合进这一基座。
+
+![Cosmos 2.5 家族能力全景图](/post4/fig-01-cosmos25-overview.png)
+
+*图 1：Cosmos 2.5 家族能力全景，依据论文 Tab.1 重绘。*
+
+---
+
+## 2. 数据体系：200M 视频片段的筛选哲学
+
+如果说模型架构决定了"能学到什么"，数据体系则决定了"有没有东西可学"。Cosmos-Predict2.5 的数据管线是可量化的强升级：处理规模更大、质量标准更严、语义结构更丰富。
+
+### 2.1 七阶段筛选管线
+
+论文 Fig.1 描绘了一条从原始视频到训练数据集的完整流水线：
+
+1. **Shot-aware 视频切分**：用高精度边界检测模型将长视频切分为独立镜头，排除生硬的转场边界
+2. **GPU 加速转码**：统一编码格式
+3. **视频裁剪**：去除黑边与空间填充
+4. **多阶段过滤**（详见下文）
+5. **视频描述（Captioning）**：每片段按 5 秒窗口划分，用 Qwen2.5-VL-7B 生成短/中/长三档描述；prompt 工程强调主体运动与关键语义细节 [§2.1]
+6. **语义去重**：embedding 聚类 → 簇内两两比较 → 保留最高分辨率版本；采用在线去重策略，新片段与已保留片段比较，平局优先旧片与高分辨率
+7. **多轴分片**：按 26 类内容类型、分辨率、宽高比、时长进行结构化分片，支撑课程训练与领域均衡
+
+### 2.2 从 30% 到 4%：更严苛的质量控制
+
+Cosmos-Predict2.5 论文对两代管线给出了一个醒目的自述对比 [§2.1]：原始视频时长从 20M 小时增加到 35M 小时，但同时，片段通过率从约 30% 锐减至约 4%（即从约 6B 个 5-60 秒片段中仅保留约 200M 个用于预训练）。**数据量的增加是乘数，质量的提升才是杠杆**。
+
+这 4% 的通过率由六道过滤关卡共同保证，按顺序依次执行：
+
+- **美学评分过滤**：评估片段的审美质量
+- **运动过滤**：量化运动程度，剔除过度静止的片段
+- **OCR 过滤**：去除过度文字覆盖的片段
+- **感知质量过滤**（类 DOVER）：剔除技术失真与感知伪影
+- **语义伪影过滤**（类 VTSS）：剔除画中画、不良转场等语义级缺陷
+- **VLM 过滤**：用 VLM（Qwen2.5-VL 系列，Bai et al., 2025）做最终高精度筛选——放在最末是因为计算最昂贵，但精度最高
+
+经过过滤的片段还需经过内容类型分类器，并显式排除游戏画面、合成视觉图案、动画、卡通等非物理分布的内容，确保模型学习的是真实世界的运动规律 [§2.1]。
+
+### 2.3 五大领域专有数据
+
+除了通用预训练数据，论文还策划了五个 Physical AI 领域的数据 [§2.2]：
+
+- **Robotics**：7 个公开数据集（AgiBot-Beta, Bridge, DROID, GR00T, 1X, OpenX, RoboMIND），中央视角合计约 30.6 万条；打标时注入数据集特定元数据（如 GR00T 的人工成功评分、Bridge 的分步指令）以抑制幻觉
+- **Autonomous Driving**：约 3.1M 条 20 秒环视片段，7 个同步相机；采样对齐地理区域、交通密度、车速、天气、光照等多元分布
+- **Smart Spaces**：仓库/工厂/工地等工业场景，约 40K 片段
+- **Human Dynamics**：YOLOX 检测 + RTMPose 姿态估计，筛选条件严格（人出现 >40% 帧 / ≤8 人 / 至少 1 人占 ≥3% 面积）
+- **Physics**：定义可观测物理现象分类法（经典力学、流体力学等），策划强调物理动态的视觉数据
+
+> **口径注意**：200M 在上下文中扮演两个角色——输入端有"over 200 million raw videos"，输出端有"approximately 200 million trainable clips"。本文中的 200M 一律指过滤后的预训练 clips，而非原始视频数量。
+
+![Cosmos 2.5 七阶段视频数据管线](/post4/fig-02-data-pipeline.png)
+
+*图 2：从原始视频到训练数据集的七阶段管线，依据论文 Fig.1 改编。*
+
+---
+
+## 3. Flow Matching：从扩散到速度场
+
+Flow Matching 是 Cosmos-Predict2.5 最核心的技术主线。理解它不仅是理解一个训练目标的替换，更是理解为什么 Cosmos 2.5 家族在更小参数规模下取得了更强的性能。
+
+### 3.1 从 EDM 到 FM：一样的扩散，不同的参数化
+
+Cosmos-Predict1 使用的是 EDM（Elucidated Diffusion Model, Karras et al., 2022），而 Predict2.5 转向了 Flow Matching（FM, Lipman et al., 2022）。
+
+论文对此给出了一个关键澄清 [§3.1]：
+
+> FM 与 EDM 在前向和反向扩散过程上是数学等价的，区别仅在于去噪网络的参数化方式。
+
+具体而言：
+- **EDM** 通过预条件系数（preconditioning coefficients）使去噪网络的输入和输出近似为标准高斯分布——这对训练稳定性有利
+- **FM** 让去噪网络直接预测扩散轨迹的**速度（velocity）**——训练目标更直接，优化更平滑，且在实践中产生更好的样本质量
+
+两者关系的最佳概括来自 Gao et al. (2025) 的标题：*"Diffusion Models and Gaussian Flow Matching: Two Sides of the Same Coin"*。
+
+**直觉理解**：告诉模型"你应该往哪个方向漂移"（速度预测）比通过预条件网络间接估计去噪方向更具可学习性。在连续时间扩散框架中，速度场天然地描述了从噪声到数据的确定性流——这正是"Flow Matching"命名的来源。
+
+### 3.2 数学形式化
+
+Flow Matching 的数学框架可以用四个核心公式概括 [§3.1]。
+
+给定数据样本 $\mathbf{x}$（图像或视频），噪声 $\boldsymbol{\epsilon} \sim \mathcal{N}(0, \mathbf{I})$，以及从 logit-normal 分布采样的时间步 $t \in [0, 1]$，插值的中间状态为：
+
+$$\mathbf{x}_t = (1 - t)\mathbf{x} + t\boldsymbol{\epsilon} \quad \text{(1)}$$
+
+这是一个从数据点到纯噪声的线性插值路径。对应的真实速度（ground-truth velocity）为：
+
+$$\mathbf{v}_t = \boldsymbol{\epsilon} - \mathbf{x} \quad \text{(2)}$$
+
+直观上，$\mathbf{v}_t$ 描述了从 $\mathbf{x}_t$ 出发到达纯噪声（或反过来从噪声回到数据）需要移动的方向和幅度。模型的训练目标是最小化预测速度 $\mathbf{u}(\mathbf{x}_t, t, \mathbf{c}; \theta)$ 与真实速度之间的均方误差：
+
+$$\mathcal{L}(\theta) = \mathbb{E}_{\mathbf{x}, \boldsymbol{\epsilon}, \mathbf{c}, t}\left[\|\mathbf{u}(\mathbf{x}_t, t, \mathbf{c}; \theta) - \mathbf{v}_t\|^2\right] \quad \text{(3)}$$
+
+其中 $\mathbf{c}$ 为条件信息（文本嵌入、参考帧等），$\theta$ 为模型参数。
+
+### 3.3 Shifted Logit-Normal：向高噪声区偏置
+
+高分辨率内容中，邻近像素高度相关。如果注入的噪声太小，模型无法"打破"这种相关性，导致学习信号微弱（Esser et al., 2024; Chen, 2023）。Cosmos-Predict2.5 的解决方案是使用 **shifted logit-normal distribution**——故意将训练样本的分布向高噪声区偏置 [§3.1]。
+
+具体做法：先从 logit-normal 采样 $t$，再通过单调变换导出偏移后的 $t_s$：
+
+$$t_s = \frac{\beta t}{1 + (\beta - 1)t} \quad \text{(4)}$$
+
+其中 $\beta$ 为偏移超参数。$\beta = 1$ 时无偏移；$\beta$ 越大，$t_s$ 越偏向高噪声端。论文采用**渐进式偏移策略**：预训练初期 256p 分辨率时 $\beta = 1$，随分辨率升至 720p 逐步增大到 $\beta = 5$ [§4.1]。
+
+不仅如此，论文还发现了一个有趣的细节问题：即使使用了 shifted logit-normal，模型仍会在生成的视频中产生帧间突变伪影（abrupt/unnatural transitions）。经过诊断，作者将原因归结为模型在高噪声区见得还不够多。为此，他们在调度器中做了一个简单但有效的修正：**让 5% 的训练样本显式取自噪声分布最高 2% 的区间** [§4.1]。这个微调显著减少了过渡伪影。
+
+### 3.4 FM 与模型其他设计的协同
+
+Flow Matching 的选择不仅影响训练目标，还与 Cosmos-Predict2.5 的其他设计产生正向协同：
+
+- FM 的速度预测目标与 DiT 骨干兼容良好——论文在 §3.2 明言"largely reuse" Predict1 的 DiT 架构，FM 并未要求额外的预条件层【解读】
+- 在统一 Text2World / Image2World / Video2World 三种模式时，条件帧和生成帧共享同一条扩散轨迹，FM 的连续时间框架为此提供了统一的数学基础【解读】
+
+![Flow Matching 路径与时间步采样示意](/post4/fig-03-flow-matching.png)
+
+*图 3：Flow Matching 的线性插值路径、速度场与 shifted logit-normal 时间步采样。*
+
+---
+
+## 4. 网络架构：DiT + Cosmos-Reason1 的融合设计
+
+Cosmos-Predict2.5 的网络架构建立在 Predict1 的 DiT（Diffusion Transformer）骨干之上，但做出了三项关键改动。
+
+### 4.1 骨干架构
+
+核心组件为重复的 DiT block（Fig.2），每个 block 包含 [§3.2, Tab.3]：
+
+- **Self-Attention**（3D RoPE 位置编码）
+- **Cross-Attention**（接收 Cosmos-Reason1 的文本嵌入）
+- **Feed-Forward Network**（GELU 激活）
+- **Adaptive Layer Normalization (AdaLN)**：通过 scale / shift / gate 三个可学习调制参数，将时间步嵌入注入每一层
+
+两个模型规格如下：
+
+| 配置 | Predict2.5-2B | Predict2.5-14B |
+|------|---------------|----------------|
+| 层数 | 32 | 36 |
+| 模型维度 | 2,048 | 5,120 |
+| FFN 隐藏维 | 8,192 | 20,480 |
+| AdaLN-LoRA 维 | 256 | 256 |
+| 注意力头数 | 16 | 40 |
+| 头维度 | 128 | 128 |
+| MLP 激活 | GELU | GELU |
+| 位置编码 | 3D RoPE | 3D RoPE |
+
+### 4.2 关键改动一：去除绝对位置编码
+
+Cosmos-Predict1 的 DiT 同时使用了绝对位置嵌入和相对位置嵌入。Predict2.5 做了一个看似细微但影响深远的决定：**只保留 3D RoPE（旋转位置编码），删除绝对位置嵌入** [§3.2]。
+
+动机来自大语言模型长上下文研究的启示（Peng et al. 2023 YaRN; bloc97 2023 NTK-aware scaling）：绝对位置嵌入将模型"绑定"到了训练时的分辨率与序列长度，对未见过的配置缺乏泛化能力。去除它们后，Cosmos-Predict2.5 可以在后训练阶段灵活地扩展到更高分辨率和更长视频序列。
+
+### 4.3 关键改动二：文本编码器从 T5 到 Cosmos-Reason1
+
+这是对生成质量影响最大的架构变化。
+
+Predict1 使用 T5 作为文本编码器——这是一个通用的 encoder-decoder 语言模型。Predict2.5 替换为 **Cosmos-Reason1**（NVIDIA, 2025），一款 decoder-only VLM 专为 Physical AI 设计 [§3.2]。
+
+替换带来的提升来自两个层面：
+
+1. **领域对齐**：Cosmos-Reason1 在 Physical AI 数据上训练，对物理场景描述的理解远超通用文本编码器
+
+2. **表示丰富度**：与传统做法（取 T5 最后一层 hidden state）不同，Cosmos-Reason1 的方案是**拼接多个 transformer block 的激活**，再投影到 1024 维空间（参考 Wang et al., 2025 在 T2I 中的设计）。这更忠实地保留了局部和全局的语言上下文——一个"红色的机械臂在金属台面上移动"的 prompt，其语义不仅包含最终的对象关系，还包含中间层的语法结构和局部特征
+
+文本嵌入通过 cross-attention 层注入到每个 DiT block 中。值得注意的是，Cosmos-Reason1 同时具备视觉编码能力（可接收图像和视频输入），论文将此标记为未来的 style control 方向 [§3.2]。
+
+### 4.4 关键改动三：视觉 Tokenizer 升级
+
+视频在进入 DiT 之前，先经过 WAN 2.1 VAE（Wan et al., 2025）——一个因果变分自编码器——进行压缩 [§3.2]：
+
+- 压缩率：$4 \times 8 \times 8$（时间 × 高度 × 宽度）
+- 再叠加 $1 \times 2 \times 2$ 的 patchification 进一步压缩
+- **生成规格**：93 像素帧 → 24 个 latent 帧 → 约 5.8 秒视频 @ 16fps
+
+> ⚠️ 这是单次生成（单 trunk）的规格。更长视频需通过 §6.1.2 所述的自回归多 trunk 方案实现。
+
+### 4.5 统一架构：三种生成模式 + 帧替换策略
+
+Cosmos-Predict2.5 最实用的工程创新之一是将 Text2World、Image2World 和 Video2World 合并到**同一个模型**中 [§3.2]。
+
+三种模式通过**帧替换策略**（frame-replacement strategy）统一处理：
+- 条件帧（Image2World 为 1 帧，Video2World 为 1 或 5 帧）被强制替换到生成序列的对应位置
+- 每个 latent token 附加一个二进制掩码标志位，区分"条件输入"和"需要生成的帧"
+- **去噪损失仅作用于标记为"待生成"的帧**，条件帧不产生梯度
+
+这一设计有两重收益：(1) **灵活性**——条件帧数量可按任务需求调整（训练时在最终阶段以 0/1/2 帧三种配置按概率 0.5/0.25/0.25 采样）；(2) **时序一致性**——早期帧忠实于条件输入，视觉线索通过自注意力在后续帧中平滑传播 [§3.2]。
+
+![Cosmos-Predict2.5 网络架构](/post4/fig-04-architecture.png)
+
+*图 4：Cosmos-Predict2.5 的 DiT、Cosmos-Reason1 与帧替换策略，依据论文 Fig.2 改编。*
+
+---
+
+## 5. 训练策略：从预训练到 RL 的机制设计
+
+Cosmos-Predict2.5 的训练配方是渐进式预训练 → 领域 SFT → 模型合并 → RL 后训练 → 时间步蒸馏。以下聚焦每个阶段的**机制动机与关键设计**，不展开训练操作细节。
+
+### 5.1 渐进式预训练
+
+预训练分为五个阶段，核心逻辑是"先学会生成高质量单帧，再学运动，再学无条件生成" [§4.1, Tab.4]：
+
+| 阶段 | 任务 | 分辨率 | 帧数 |
+|------|------|--------|------|
+| 1 | Text2Image | 256p | 1 |
+| 2 | Text2Image \| Video2World | 256p | 1 \| 93 |
+| 3 | Text2Image \| Video2World | 480p | 1 \| 93 |
+| 4 | Text2Image \| Video2World | 720p | 1 \| 93 |
+| 5 | Text2Image \| Video2World \| Text2World | 720p | 1 \| 93 \| 93 |
+
+分辨率递进与 Flow Matching 的 $\beta$ 偏移同步增长：256p 时 $\beta=1$，到 720p 时 $\beta=5$。V2W 阶段随机取 1 或 5 条件帧；最终阶段加入 T2W（0 条件帧），以 0.5/0.25/0.25 的混合概率采样。
+
+### 5.2 领域 SFT + 模型合并：多专家融合
+
+预训练完成后，论文并没有直接做 RL，而是引入了一个两阶段方案 [§4.2.1]：
+
+**领域独立 SFT**。用 InternVideo2 embedding 训练的多头分类器将数据分为五个领域（Object Permanence 10.4M / High Motion 1.0M / Complex Scenes 1.6M / Driving 3.1M / Robotic Manipulation 730K）。关键决策：**每个领域独立微调一个专属模型**，而非在混合数据集上联合训练。这样做的动机很直接——避免为平衡不同领域的混合比例而牺牲任何一方的性能。
+
+论文同时引入了一个 **4K cooldown 阶段**：用精选的高质量 4K 视频对预训练基座做学习率线性衰减至零，提升细粒度视觉细节与运动平滑度 [§4.2.1]。
+
+**模型合并**。领域 SFT 模型在自己的领域大幅优于基座，但在通用域存在轻微退化。解决方案是将五个领域 SFT 模型与 cooldown 模型（共 6 个）合并为一个统一模型。论文尝试了四种合并方法——Model Soup、TIES、DARE-Linear、DARE-Ties——并对每种方法进行超参网格搜索（每种生成 20+ 个候选），用小规模精选难题集做初步筛选，再用更大评测集的人工偏好验证 [§4.2.1]。
+
+**关键发现**：简单的网格搜索超参优于基于单独模型 win rate 的启发式选择——这意味着合并空间是非凸的，最优解需要通过搜索而非规则推导。除 DARE-Linear 外各方法性能相当，论文最终选择最简单的 Model Soup。
+
+SFT 在各领域的 human win rate vs 预训练基线（Fig.3）：Object Permanence 50.9%、High Motion 44.0%、Complex Scene 42.6%、Driving 47.9%、Robotic Manipulation 72.6% [§4.2.1]。
+
+![领域 SFT 相对预训练基线的胜率](/post4/fig-05-sft-winrate.png)
+
+*图 5：各领域 SFT 模型相对预训练基线的胜率，来源：论文 Fig.3。*
+
+![模型合并方法的领域表现对比](/post4/fig-06-model-soup.png)
+
+*图 6：Model Soup、TIES 与 DARE-TIES 的领域表现对比，来源：论文 Fig.4。*
+
+### 5.3 强化学习后训练：对齐人类偏好
+
+**核心问题**：MSE 最小化 ≠ 人类偏好最大化。一个像素级完美但物理上不合理的视频可能在 MSE 上得分很高，却不符合人类对"好的世界模拟"的直觉判断。
+
+论文采用 GRPO（Guo et al., 2025）+ **VideoAlign**（Liu et al., 2025）奖励模型的框架 [§4.2.2]。VideoAlign 从三个维度评估生成视频的质量：文本对齐（text alignment）、运动质量（motion quality）和视觉质量（visual quality）。
+
+RL 训练的关键设计：
+- 在 GRPO 框架下，每个条件生成多个输出，rollout 组内归一化奖励计算 advantage
+- 受显存约束，轨迹概率逐步分解计算；梯度按 advantage 累计后统一更新参数
+- **扩散损失正则化**（Ye et al., 2025）：在 RL 优化的同时保留微调集上的 diffusion loss，防止 reward hacking——这是该训练框架能稳定收敛的关键设计
+
+**效果**（Tab.6，为 merged 模型的 Sum 列，三个维度 Reward 之和）[§4.2.2]：
+- Text2World：1.23 → 1.74（+41%）
+- Image2World：0.24 → 0.45（+88%）
+
+> RL 训练同时应用于 pre-trained 模型和 merged 模型。pre-trained 的 RL 提升为 T2W 1.08→1.69、I2W 0.23→0.42，作为参照。
+
+论文配图 Fig.5 的人类投票显示 RL 在人类偏好上也带来正向提升。需要注意 Fig.5 是堆叠柱状图，不同列中 RL/Before-RL/Tie 的柱值归属需对照原图确认——**正文引用时以 Tab.6 的奖励数字为主要证据** [§4.2.2]。
+
+**意义**：这是视频生成领域 RL 后训练的早期规模化成功案例，证明了 RL 可以在视觉质量上产生人类可感知的提升，且扩散损失正则化是防止 reward hacking 的有效手段。
+
+![强化学习前后的人类偏好对比](/post4/fig-07-rl-winrate.png)
+
+*图 7：强化学习前后的人类偏好对比，来源：论文 Fig.5。*
+
+### 5.4 时间步蒸馏
+
+为了加速推理，论文采用 **rCM**（Zheng et al., 2025）——一种混合前向-反向联合蒸馏框架（连续时间一致性蒸馏 + 分布匹配蒸馏）[§4.2.3]。
+
+蒸馏后模型仅需 **4 步**即可生成高保真样本，质量接近 teacher 模型 [Tab.7-8]：
+- T2W Overall：0.768（teacher）→ 0.764（distilled）
+- I2W Overall：0.810（teacher）→ 0.816（distilled）
+
+I2W 蒸馏后甚至略超 teacher 的现象值得关注——这可能是分布匹配蒸馏在条件图像指导下带来的额外正则化效应【解读】。
+
+---
+
+## 6. 实验结果：简要定位
+
+鉴于 Cosmos 3 已经发布，本文不再展开 Cosmos-Predict2.5 的榜单与逐项对比，只保留它在当时的技术定位：2B 模型在 PAI-Bench 的 Text2World 上与 Wan 2.2 27B-A14B 表现相近，在 Image2World 上取得 0.810 的 Overall Score；这些结果说明前文的数据筛选、Flow Matching、统一架构和后训练组合能够以较小参数规模建立有竞争力的 Physical AI 世界模型基线 [§5, Tab.10-11]。相比这些已具有明显版本时效性的数字，下面更值得关注的是 Cosmos-Transfer2.5 如何把 Predict2.5 变成可受空间条件约束的生成器。
+
+---
+
+## 7. Cosmos-Transfer2.5：条件控制
+
+Cosmos-Transfer2.5 构建在 Cosmos-Predict2.5-2B 之上，是一个 ControlNet 风格的条件世界生成模型。它接收空间控制信号（边缘、模糊、深度、分割）并生成高质量视频——控制信号可来自物理仿真引擎（如 NVIDIA IsaacSim）或真实世界视频 [§6.1]。
+
+### 7.1 ControlNet 如何接入 Cosmos-Predict2.5
+
+**Cosmos-Transfer2.5 的 ControlNet 本质是针对视频 DiT 的 residual conditioning branch**：把 HDMap / LiDAR 等时空控制视频编码成 token，通过并行 Transformer Control Block 产生 hidden residual，在多个 DiT 层注入冻结的基础模型，从而实现对驾驶场景几何、轨迹和多视角一致性的精确控制。
+
+它不是把控制图与输入视频简单做通道拼接，而是在 Predict2.5 的 DiT 主分支之外增加可训练的控制分支。Transfer2.5 论文说明它沿用 Cosmos-Transfer1 的总体设计，并把主干替换为 Cosmos-Predict2.5-2B [§6.1]；上述融合过程可以进一步拆成下面四步：
+
+1. **主分支保留世界模型能力**：带噪视频 latent 仍由 Predict2.5 的 DiT 主干处理，文本条件仍通过 cross-attention 注入。ControlNet 不重新训练一个完整世界模型，而是在这个已有生成先验上学习“空间条件应如何修正当前特征”。
+2. **每种模态使用独立控制分支**：Edge、Blur、Depth、Segmentation 分别进入自己的控制分支。控制分支的 transformer block 从主干对应 block 继承初始化权重；其输出经过零初始化的线性层，再以残差形式加回主分支对应层。零初始化让新增分支在训练开始时近似不扰动基座，随后逐渐学会施加条件修正 [Cosmos-Transfer1 §2-3]。
+3. **多模态在残差层面融合**：第 $i$ 个模态在第 $j$ 个控制块产生特征 $\mathbf{h}_i^j$，再由时空权重图 $\mathbf{w}_i$ 逐位置、逐帧调节；注入主干的控制残差可写成
+
+$$
+\Delta \mathbf{h}^{j}=\sum_i \mathbf{w}_i\odot\mathbf{h}_i^{j}.
+$$
+
+权重图决定某个像素和时刻更听从哪一种控制：例如前景强调 Edge/Blur 以保留机器人轮廓，背景强调 Depth/Segmentation 以约束几何与语义。若同一时空位置的模态权重之和超过 1，则先归一化。各分支可以分开训练、推理时再组合，因此不要求所有控制模态都拥有严格成对的训练数据，也能按任务增删模态 [Cosmos-Transfer1 §3]。
+4. **Transfer2.5 改变控制注入的深度位置**：Transfer1 将四个控制块连续放在主干起始处；Transfer2.5 保持四块总数不变，却改为**每经过七个主干 block 插入一个控制块**。条件残差由“前段一次性写入”变为沿 DiT 深度持续校正，使浅层、中层和深层特征都能重新接收空间约束 [§6.1]。
+
+因此，融合路径可以概括为：**控制视频 → 模态专属控制分支 → 零初始化线性投影 → 时空权重融合 → 分阶段残差注入 Predict2.5 DiT**。文本 prompt 负责“生成什么样的世界”，Edge / Depth / Segmentation 等空间条件负责“物体在哪里、边界和几何如何随时间变化”，二者在主干中共同约束 Flow Matching 的速度场预测。
+
+四种控制模态各自独立训练。数据方面，Depth 条件由 Video Depth Anything 为 10M 条视频生成，Segmentation 条件由 SAMv2 处理 3M 条视频，Edge 与 Blur 条件按 Transfer1 流程精选 14M 条视频 [§6.1]。这种按模态拆分的数据与分支设计，正好对应上面的“独立训练、推理组合”机制。
+
+### 7.2 规模与性能
+
+Transfer2.5-2B 仅 2B 参数（Transfer1-7B 为 7B，约 3.5× 更小），但在 PAIBench-Transfer（600 条评测视频，含驾驶与机器人等领域）上全模态超越 [§6.1.1, Tab.12]：
+
+- 单模态：Blur SSIM 0.89→0.90；Edge F1 0.38→0.49；Depth si-RMSE 0.76→0.70（↓更好）；Seg mIoU 0.70→0.71
+- Multi-modal uniform weights（四模态各 0.25）：Overall Quality 9.24→9.31
+
+论文将这一提升归因于两点：(1) 更强的基座 Predict2.5-2B；(2) 更精挑细选的 Physics-AI 训练数据 [§6.1.1]。
+
+### 7.3 Real2Real 数据增强与驾驶模拟
+
+**机器人策略学习** [§6.2]：在双臂 pick-and-place 任务中，Transfer2.5 生成的视觉增强数据将策略在对抗性视觉扰动下的成功率从 1/30（无增强）和 5/30（标准图像增强）提升到 **24/30**（Tab.13）。无增强基线仅 1 例成功的事实凸显了语义级世界翻译的不可替代性。
+
+**自动驾驶场景** [§6.3]：这是 Transfer2.5 最具视觉冲击力的应用。模型的 world scenario map 并非 BEV（鸟瞰图），而是将 **HD 地图元素**（车道线、道路标线、路沿、交通灯状态等）与**动态 3D 包围盒**（车辆/行人等 actor）投影到**七个相机视角**渲染而成的控制视频（Fig.14）。训练数据规模：Predict 多视角模型使用约 **1.5M 条** 20 秒 7 相机片段，Transfer 控制网在此基础上精选 **14 万条** RDS-HQ 多视角场景（含 HD 地图标注）。注意此处 1.5M 为多视角数据集，与 §2.3 中 Predict 驾驶预测的 3.1M 条数据（预测模型预训练用）是不同的数据集合。
+
+视觉质量（Tab.14，Transfer2.5-2B/auto/multiview vs Transfer1-7B-Sample-AV）：FVD StyleGAN 24.222 vs 56.606（约 2.3×，论文 "up to 2.3x" 即指向此处），FID 20.022 vs 22.633。3D 检测指标（Tab.15）最高提升约 60%（LET-AP 0.243→0.394）。
+
+### 7.4 长时域视频翻译
+
+DiT 模型受限于上下文长度，长视频通过自回归多 trunk 方案实现（每 trunk 93 帧）。分块生成必然带来误差累积——为此论文提出 **RNDS**（Relative Normalized Dover Score）指标来量化这一效应 [§6.1.2, 式 5]：
+
+$$\text{RNDS}[i] = \frac{\text{DOVER}[i]}{\text{DOVER}_\text{GT}[i]} \bigg/ \frac{\text{DOVER}[1]}{\text{DOVER}_\text{GT}[1]}$$
+
+该指标从 (1, 1) 出发，曲线随 chunk index 下降越小，说明误差累积越少。在 17 条 30-120 秒评测视频上，Transfer2.5-2B 在四种控制模态下 RNDS 曲线均优于 Transfer1-7B（Fig.10），表明其长视频保真度显著更高。
+
+![World scenario map 控制的驾驶多视图生成](/post4/fig-11-transfer-driving.png)
+
+*图 8：World scenario map 控制的七相机驾驶视频生成，来源：论文 Fig.14。*
+
+---
+
+## 8. Physical AI 应用全景
+
+### 8.1 多视图 + 相机可控生成
+
+Cosmos-Transfer2.5-2B/robot/multiview 能接收参考视角视频和 N 条目标相机轨迹，合成 N 个同步目标视角视频 [§6.4]。
+
+相机参数的编码方式颇具巧思：使用 **Plücker raymap**（Sitzmann et al., 2021）将像素映射为 6D 光线表示，经 patchify 后通过 camera projection layer 对齐到视频 latent 维度，最后直接**加到视频 token 上**再进入 self-attention。训练时仅 self-attention 层和 camera projection layer 可训练，其余冻结。
+
+**跨视图一致性**（80 条在野机器人操作视频 × 16 条轨迹, Tab.17）：多视角版 Sampson Error 19.73 vs 单视角版 26.61——多视角联合生成带来的跨视图一致性提升显著，而相机位姿精度持平（TransErr 均为 0.08, RotErr 0.19 vs 0.20）。
+
+### 8.2 VLA 训练的合成数据
+
+Cosmos-Predict2.5 在 VLA（Vision-Language-Action）训练中的应用遵循一个简洁范式 [§6.5]：文本指令 → 生成视频 → 逆动力学模型（IDM）从视频中提取伪动作序列 → 得到 vision + language + action 三标注的合成训练数据，扩充真实演示。
+
+在 DreamGen benchmark（Jang et al., 2025）的 GR1 人形机器人数据集上，以 GPT-4o 为评测器（Tab.18）：
+
+- Cosmos-Predict2.5-14B/robot/gr00tdream-gr1：Object 91.8 / Behavior 70.2 / Environment 69.0
+- **Object 与 Environment 维度领先**于 Hunyuan、CogVideoX、WAN 2.1【事实】——论文原话为"particularly in object and environment generalization"
+- Behavior 维度 GPT-4o 口径下 WAN 2.1 略高（72.3 vs 70.2）
+- 注：Tab.18 同时提供 Qwen2.5VL 评测口径（Object 69.4 / Behavior 59.6 / Environment 69.0），不同评测器的绝对分数不可直接比较
+
+### 8.3 Action-Conditioned World Generation
+
+Cosmos-Predict2.5-2B/robot/action-cond 扩展了世界生成的能力边界：输入单张条件图像 + 动作序列，输出未来帧 chunk，并通过自回归滚动生成完整轨迹 [§6.6]。
+
+动作注入设计：用 action embedder MLP 将每个 7 维动作向量（$\Delta x, \Delta y, \Delta z, \Delta\theta_r, \Delta\theta_p, \Delta\theta_y, \text{GripperWidth}$）映射为张量，**加到 DiT 的时间步嵌入上**。消融实验（Tab.20）确认这一方案优于 cross-attention 和 channel concatenation 两种替代方案。
+
+在 Bridge 数据集上的评估（Tab.19）：PSNR 21.14→24.95，SSIM 0.82→0.85，FVD 190→146——相比 Predict1 的 action-conditioned 模型在所有指标上均有显著提升。
+
+![机器人多视图同步生成](/post4/fig-12-multiview.png)
+
+*图 9：机器人多视图同步生成与相机轨迹控制，来源：论文 Fig.16 / Fig.19。*
+
+![Action-conditioned 世界生成对比](/post4/fig-13-action-cond.png)
+
+*图 10：Bridge 数据集上的 action-conditioned rollout 对比，来源：论文 Fig.20。*
+
+---
+
+## 9. 局限
+
+> ⚠️ **注意**：论文无独立的 Limitations 章节。以下分析基于论文事实与作者解读，非论文原话。
+
+**基于论文事实的局限**：
+
+- **单 trunk 生成时长有限**：单次生成 93 帧（约 5.8 秒 @ 16fps）。论文通过自回归多 trunk + RNDS 误差累积指标缓解了这一问题，但误差累积仍是 open problem——RNDS 曲线虽远优于 Transfer1，但随 chunk index 仍在持续下降（Fig.10）【事实 + 解读】
+
+- **模型规模 gap**：2B 与 14B 之间缺乏中间规模的探索。14B 相对 2B 的增益在人类评估中比自动指标更显著，暗示规模的边际收益尚未饱和【解读】
+
+- **评估体系单一**：依赖 PAI-Bench 作为主要评测平台。Physical AI 涵盖自动驾驶、机器人操作、人机交互等多个互不重叠的场景，需要更多维度、更多数据分布的基准【解读】
+
+## 10. 总结
+
+Cosmos-Predict2.5 的技术跃迁可以用一条主线串联：**Flow Matching 改变了训练目标，论文同时在数据（更严苛的 4% 通过率）、架构（统一三模态、去除 EDM 预条件层）和训练配方（RL 后训练打开了对齐人类偏好的新维度）三个维度做了协同升级**。
+
+几个关键判断：
+
+- **数据质量比规模更关键**：200M 高质量片段 + 4% 通过率的组合，让 2B 模型有能力在 I2W 上与 27B MoE 模型竞争。这不是"小模型奇迹"，而是数据工程的红利【解读】
+
+- **RL 后训练为视频生成打开了新优化维度**：传统的扩散损失（MSE）本质上是对潜在空间中速度场的逐点回归——物理一致性、运动自然度、语义对齐这些人类关心的维度，需要 RL + reward model 来显式建模
+
+- **Cosmos 2.5 家族的开源意义**：作为首个明确面向 Physical AI 的开放世界基础模型系列（官方代码仓库以 Apache 2.0 许可发布，模型权重以 NVIDIA Open Model License 发布），Cosmos 为社区提供了可复现、可微调、可研究的基线，降低了 Physical AI 研究的准入门槛
+
+对实践者的启示：如果你在构建 Physical AI 系统，Cosmos-Transfer2.5 的 Real2Real 数据增强（成功率达 24/30 vs 基线的 1/30）和 world scenario map 驱动的多视图驾驶仿真是两个值得优先尝试的落地路径。
+
+---
+
+**参考文献**
+
+1. NVIDIA. *World Simulation with Video Foundation Models for Physical AI*. arXiv:2511.00062v2, 2026.（主引用）
+2. NVIDIA. *Cosmos World Foundation Model Platform for Physical AI*. arXiv:2501.03575, 2025.
+3. NVIDIA. *Cosmos-Reason1: From Physical Common Sense to Embodied Reasoning*. arXiv:2503.15558, 2025.
+4. Lipman et al. *Flow Matching for Generative Modeling*. arXiv:2210.02747, 2022.
+5. Karras et al. *Elucidating the Design Space of Diffusion-Based Generative Models*. NeurIPS 2022.
+6. Gao et al. *Diffusion Models and Gaussian Flow Matching: Two Sides of the Same Coin*. ICLR 2025.
+7. Esser et al. *Scaling Rectified Flow Transformers for High-Resolution Image Synthesis*. ICML 2024.
+8. Wan et al. *Wan: Open and Advanced Large-Scale Video Generative Models*. arXiv:2503.20314, 2025.
+9. Zhou et al. *PAI-Bench: A Comprehensive Benchmark for Physical AI*. arXiv:2512.01989, 2025.
+10. Jang et al. *DreamGen: Unlocking Generalization in Robot Learning through Video World Models*. arXiv:2505.12705, 2025.
+11. Ye et al. *Data-Regularized Reinforcement Learning for Diffusion Models at Scale*. arXiv:2512.04332, 2025.
+12. Liu et al. *Improving Video Generation with Human Feedback*. arXiv:2501.13918, 2025.
+13. Zheng et al. *Large Scale Diffusion Distillation via Score-Regularized Continuous-Time Consistency*. arXiv:2510.08431, 2025.
+14. 官方仓库: github.com/nvidia-cosmos/cosmos-predict2.5; github.com/nvidia-cosmos/cosmos-transfer2.5
+15. 模型卡: huggingface.co/nvidia/Cosmos-Predict2.5-2B（及 -14B、Cosmos-Transfer2.5-2B）
+16. NVIDIA. *Cosmos-Transfer1: Conditional World Generation with Adaptive Multimodal Control*. arXiv:2503.14492, 2025.
+
+---
+
+*本文原论文为 "World Simulation with Video Foundation Models for Physical AI" (arXiv:2511.00062v2, © 2026 NVIDIA)。Cosmos-Predict2.5 官方代码仓库以 Apache 2.0 许可发布，模型权重以 NVIDIA Open Model License 发布。Cosmos 3 已发布，本文分析限定于 Cosmos-Predict2.5 / Cosmos-Transfer2.5（2025-11 提交）。*
