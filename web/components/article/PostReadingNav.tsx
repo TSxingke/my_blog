@@ -3,14 +3,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useState } from "react";
-
-const navItems = [
-  { label: "首页", href: "/" },
-  { label: "文章", href: "/posts" },
-  { label: "案例展示", href: "#" },
-  { label: "生活", href: "#" },
-  { label: "简历", href: "#" },
-];
+import { siteNavigation } from "@/lib/site-navigation";
 
 export function PostReadingNav() {
   const [open, setOpen] = useState(false);
@@ -82,7 +75,7 @@ export function PostReadingNav() {
 
         <p className="neon-title mt-7 text-xs">站点导航</p>
         <nav className="mt-3 space-y-1.5 text-base">
-          {navItems.map((item) => (
+          {siteNavigation.map((item) => (
             <Link
               key={item.label}
               href={item.href}

@@ -6,17 +6,10 @@ import { SuperSplatIframe } from "@/components/splat/SuperSplatIframe";
 import { ShowcaseVideo } from "@/components/video/ShowcaseVideo";
 import { SiteIcpFooter } from "@/components/layout/SiteIcpFooter";
 import { getAllPostsSorted } from "@/lib/posts";
+import { siteNavigation } from "@/lib/site-navigation";
 
 /** 放在 `public/` 下的多视角雨天演示视频（文件名以你本地为准）。 */
 const SHOWCASE_VIDEO_SRC = "/multiview_rainy_small.mp4";
-
-const navItems = [
-  { label: "首页", href: "/" },
-  { label: "文章", href: "/posts" },
-  { label: "案例展示", href: "#" },
-  { label: "生活", href: "#" },
-  { label: "简历", href: "#" },
-];
 
 const trendingTags = [
   "#3DGS",
@@ -51,7 +44,7 @@ export default function Home() {
             </p>
           </div>
           <nav className="space-y-2 text-sm">
-            {navItems.map((item) => (
+            {siteNavigation.map((item) => (
               <Link
                 key={item.label}
                 href={item.href}

@@ -321,3 +321,293 @@ body {
   border-color: rgba(13, 148, 136, 0.55);
   background: #fff;
 }
+
+/* ---------- 生活页：延续科技博客基底，降低光晕并局部引入暖色 ---------- */
+.life-page-root {
+  --life-panel-border: rgba(120, 245, 255, 0.23);
+  --life-panel-glow: rgba(0, 252, 255, 0.085);
+  color: var(--text-main);
+}
+
+.life-panel {
+  min-width: 0;
+  border: 1px solid var(--life-panel-border);
+  background: rgba(7, 14, 23, 0.8);
+  box-shadow:
+    0 18px 55px rgba(0, 0, 0, 0.2),
+    0 0 18px var(--life-panel-glow),
+    inset 0 1px 0 rgba(255, 255, 255, 0.035);
+  backdrop-filter: blur(10px);
+}
+
+.life-hero {
+  box-shadow:
+    0 24px 70px rgba(0, 0, 0, 0.28),
+    0 0 24px rgba(0, 252, 255, 0.06);
+}
+
+.life-hero-visual {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 76% 28%, rgba(0, 252, 255, 0.12), transparent 28%),
+    linear-gradient(135deg, #0b1a24 0%, #071018 52%, #101820 100%);
+}
+
+.life-hero-visual::before,
+.life-hero-visual::after {
+  position: absolute;
+  content: "";
+  pointer-events: none;
+}
+
+.life-hero-visual::before {
+  inset: -18%;
+  background-image:
+    linear-gradient(rgba(146, 163, 184, 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(146, 163, 184, 0.055) 1px, transparent 1px);
+  background-size: 48px 48px;
+  transform: perspective(650px) rotateX(64deg) translateY(14%);
+  transform-origin: center bottom;
+}
+
+.life-hero-visual::after {
+  width: min(58vw, 42rem);
+  aspect-ratio: 1;
+  border: 1px solid rgba(103, 232, 249, 0.08);
+  border-radius: 999px;
+  box-shadow:
+    0 0 0 4rem rgba(103, 232, 249, 0.018),
+    0 0 0 9rem rgba(103, 232, 249, 0.012);
+}
+
+.life-focus:focus-visible,
+.life-gallery:focus-visible {
+  outline: 2px solid rgba(103, 232, 249, 0.82);
+  outline-offset: 3px;
+}
+
+.life-interactive {
+  transition:
+    transform 200ms ease,
+    border-color 200ms ease,
+    background-color 200ms ease,
+    color 200ms ease,
+    box-shadow 200ms ease;
+}
+
+.life-video-placeholder,
+.life-empty-state,
+.life-equipment-placeholder {
+  border: 1px dashed rgba(165, 243, 252, 0.16);
+  background:
+    linear-gradient(135deg, rgba(8, 47, 73, 0.13), transparent 55%),
+    rgba(0, 0, 0, 0.2);
+}
+
+.life-video-placeholder {
+  display: grid;
+  place-items: center;
+  min-height: 16rem;
+  padding: 1.5rem;
+  text-align: center;
+}
+
+.life-empty-state {
+  min-height: 10rem;
+  padding: 1.5rem;
+}
+
+.life-gallery {
+  scroll-snap-type: x proximity;
+  scrollbar-color: rgba(103, 232, 249, 0.24) rgba(0, 0, 0, 0.18);
+  scrollbar-width: thin;
+}
+
+.life-equipment-placeholder {
+  position: relative;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.life-equipment-placeholder::before,
+.life-equipment-placeholder::after {
+  position: absolute;
+  content: "";
+  border: 1px solid rgba(103, 232, 249, 0.12);
+  border-radius: 999px;
+}
+
+.life-equipment-placeholder::before {
+  width: 7rem;
+  height: 7rem;
+  transform: translateX(-3.5rem);
+}
+
+.life-equipment-placeholder::after {
+  width: 7rem;
+  height: 7rem;
+  transform: translateX(3.5rem);
+}
+
+.life-equipment-placeholder > span {
+  position: relative;
+  z-index: 1;
+  padding: 0.4rem 0.6rem;
+  background: #071018;
+  color: rgba(165, 243, 252, 0.42);
+  font-family: var(--font-jetbrains-mono), ui-monospace, monospace;
+  font-size: 0.66rem;
+  letter-spacing: 0.16em;
+}
+
+.life-shuttle-mark {
+  position: relative;
+  width: 7rem;
+  height: 7rem;
+  justify-self: start;
+  border: 1px solid rgba(165, 243, 252, 0.13);
+  border-radius: 999px;
+  background: rgba(6, 78, 99, 0.08);
+}
+
+.life-shuttle-mark::before {
+  position: absolute;
+  top: 1.5rem;
+  left: 3.1rem;
+  width: 1.1rem;
+  height: 2.8rem;
+  border: 1px solid rgba(165, 243, 252, 0.28);
+  border-radius: 50% 50% 35% 35%;
+  content: "";
+  transform: rotate(28deg);
+}
+
+.life-shuttle-mark::after {
+  position: absolute;
+  top: 3.85rem;
+  left: 3.45rem;
+  width: 1.25rem;
+  height: 0.55rem;
+  border: 1px solid rgba(165, 243, 252, 0.28);
+  border-radius: 999px;
+  content: "";
+  transform: rotate(28deg);
+}
+
+.life-warm-section[data-life-tone="warm"] {
+  --life-panel-border: rgba(251, 191, 36, 0.2);
+  --life-panel-glow: rgba(180, 83, 9, 0.1);
+  background:
+    radial-gradient(circle at 86% 12%, rgba(180, 83, 9, 0.13), transparent 30%),
+    linear-gradient(145deg, rgba(29, 13, 14, 0.93), rgba(8, 13, 20, 0.94) 62%);
+}
+
+.life-card-empty {
+  display: grid;
+  gap: 1.5rem;
+  align-items: center;
+  min-height: 11rem;
+  padding: 1.5rem;
+  border: 1px dashed rgba(251, 191, 36, 0.18);
+  border-radius: 1rem;
+  background: rgba(69, 26, 3, 0.08);
+}
+
+.life-card-back {
+  width: 4.25rem;
+  aspect-ratio: 5 / 7;
+  border: 1px solid rgba(253, 230, 138, 0.28);
+  border-radius: 0.5rem;
+  background:
+    linear-gradient(45deg, transparent 42%, rgba(251, 191, 36, 0.12) 43% 57%, transparent 58%),
+    linear-gradient(-45deg, transparent 42%, rgba(251, 191, 36, 0.08) 43% 57%, transparent 58%),
+    #281314;
+  background-size: 12px 12px;
+  box-shadow: 0.7rem 0.6rem 0 rgba(120, 53, 15, 0.14);
+  transform: rotate(-4deg);
+}
+
+.life-playing-card {
+  min-width: 0;
+  padding: 0.75rem;
+  border: 1px solid rgba(251, 191, 36, 0.15);
+  border-radius: 1rem;
+  background: rgba(24, 11, 13, 0.65);
+}
+
+.life-playing-card:hover {
+  border-color: rgba(253, 230, 138, 0.32);
+  box-shadow: 0 10px 28px rgba(120, 53, 15, 0.12);
+  transform: translateY(-4px);
+}
+
+.life-book-spines {
+  display: flex;
+  align-items: end;
+  gap: 0.25rem;
+  width: 8.5rem;
+  height: 7rem;
+  padding: 0.75rem;
+  border-bottom: 1px solid rgba(165, 243, 252, 0.2);
+}
+
+.life-book-spines > span {
+  display: block;
+  width: 1.35rem;
+  border: 1px solid rgba(165, 243, 252, 0.16);
+  border-radius: 0.2rem 0.2rem 0 0;
+  background: rgba(8, 51, 68, 0.26);
+}
+
+.life-book-spines > span:nth-child(1) {
+  height: 4.1rem;
+}
+
+.life-book-spines > span:nth-child(2) {
+  height: 5rem;
+  background: rgba(30, 41, 59, 0.72);
+}
+
+.life-book-spines > span:nth-child(3) {
+  height: 4.55rem;
+  background: rgba(13, 78, 86, 0.26);
+}
+
+.life-book-spines > span:nth-child(4) {
+  height: 5.4rem;
+  background: rgba(30, 41, 59, 0.72);
+}
+
+@media (min-width: 640px) {
+  .life-card-empty {
+    grid-template-columns: auto minmax(0, 1fr);
+    padding: 2rem;
+  }
+}
+
+@media (max-width: 767px) {
+  .life-shuttle-mark {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .life-page-root {
+    scroll-behavior: auto;
+  }
+
+  .life-page-root .life-interactive,
+  .life-page-root .life-playing-card {
+    transition-duration: 0.01ms !important;
+  }
+
+  .life-page-root .life-interactive:hover,
+  .life-page-root .life-playing-card:hover,
+  .life-page-root .life-card-back,
+  .life-page-root .life-hero-visual::before {
+    transform: none;
+  }
+}
