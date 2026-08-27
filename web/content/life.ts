@@ -1,3 +1,7 @@
+import { readBooks, type BookEntry } from "./books";
+
+export type { BookEntry } from "./books";
+
 export type LifeImage = {
   src: `/life/${string}`;
   alt: string;
@@ -19,16 +23,6 @@ export type PlayingCard = {
   name: string;
   image: LifeImage;
   note?: string;
-};
-
-export type BookEntry = {
-  id: string;
-  title: string;
-  author: string;
-  cover?: LifeImage;
-  review: string;
-  tags: string[];
-  status: "read" | "reading" | "planned";
 };
 
 export type LifeContent = {
@@ -159,13 +153,6 @@ export const lifeContent: LifeContent = {
     ],
     gallery: [
       {
-        src: "/life/cycling/speed.jpg",
-        alt: "车流旁的骑行瞬间",
-        width: 853,
-        height: 1280,
-        caption: "疾驰 / 速度",
-      },
-      {
         src: "/life/cycling/birds-nest.jpg",
         alt: "鸟巢前的公路车",
         width: 1280,
@@ -199,6 +186,13 @@ export const lifeContent: LifeContent = {
         width: 1280,
         height: 960,
         caption: "雄安 / 抵达",
+      },
+      {
+        src: "/life/cycling/speed.jpg",
+        alt: "车流旁的骑行瞬间",
+        width: 853,
+        height: 1280,
+        caption: "疾驰 / 速度",
       },
     ],
     equipment: [
@@ -239,7 +233,7 @@ export const lifeContent: LifeContent = {
     ],
   },
   reading: {
-    status: "preparing",
-    note: "已读书单和短评正在整理。准备好后，这里会成为一份可以慢慢增长的阅读档案。",
+    status: "ready",
+    books: readBooks,
   },
 };

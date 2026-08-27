@@ -581,6 +581,43 @@ body {
   background: rgba(30, 41, 59, 0.72);
 }
 
+.life-reading-overview {
+  border: 1px solid rgba(165, 243, 252, 0.13);
+  background:
+    radial-gradient(circle at 12% 24%, rgba(6, 182, 212, 0.08), transparent 32%),
+    rgba(0, 0, 0, 0.16);
+}
+
+.life-focus-within:focus-within {
+  border-color: rgba(103, 232, 249, 0.5);
+  box-shadow: 0 0 0 2px rgba(103, 232, 249, 0.12);
+}
+
+.life-book-entry {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(165, 243, 252, 0.12);
+  background:
+    linear-gradient(90deg, rgba(34, 211, 238, 0.055), transparent 24%),
+    rgba(255, 255, 255, 0.018);
+}
+
+.life-book-entry::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 2px;
+  background: linear-gradient(180deg, transparent, rgba(103, 232, 249, 0.36), transparent);
+  content: "";
+}
+
+.life-book-entry:hover {
+  border-color: rgba(165, 243, 252, 0.24);
+  background:
+    linear-gradient(90deg, rgba(34, 211, 238, 0.075), transparent 30%),
+    rgba(255, 255, 255, 0.026);
+  transform: translateY(-2px);
+}
+
 @media (min-width: 640px) {
   .life-card-empty {
     grid-template-columns: auto minmax(0, 1fr);
