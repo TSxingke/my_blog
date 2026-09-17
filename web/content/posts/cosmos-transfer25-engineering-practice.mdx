@@ -1,0 +1,382 @@
+---
+title: "Cosmos 2.5 技术系列（二）：从 Predict 基线到 Transfer 自动驾驶合成数据实践"
+description: "记录 Cosmos 2.5 在研发验证环境中的工程实践：Predict2.5 基线、World Scenario 与 HDMap 辨析，以及 Transfer2.5 自动驾驶合成数据链路。不含训练部分，也不代表生产部署方案。"
+date: "2026-09-15"
+author: "Nova & Orion"
+tags: ["cosmos2.5", "cosmos-transfer2.5", "synthetic-data", "engineering"]
+---
+> 这是 Cosmos 2.5 系列的第二篇。上一篇讲模型为什么这样设计，这一篇只谈工程实践：怎样把 Predict2.5 和 Transfer2.5 接进自动驾驶合成数据链路，以及过程中真正遇到的问题。
+>
+> 本文不涉及训练与后训练。World Scenario 的生成细节已在《Cosmos-Drive-Dreams：从结构化标签到自动驾驶世界生成》中介绍，这里只保留理解链路所需的部分。文中的【官方文档事实】【本次实践观察】【作者判断】分别对应官方材料、本机实测和个人工程取舍。
+>
+> **适用范围说明**：本文偏向研发与验证环境，目标是尽快跑通链路、隔离环境和数据问题。文中的容器组织、缓存复用、少卡验证与批处理方式是本次研发实践，不代表实际生产工程部署方案。生产环境还需要单独考虑镜像与依赖治理、权限与密钥、资源隔离、任务编排、监控告警、高可用及安全审计等问题。
+
+---
+
+## 0. 开场：从"理解 Cosmos 2.5"到"把它跑进数据链路"
+
+上一篇讨论了 Predict2.5 的生成基座，以及 Transfer2.5 如何引入空间条件。真正动手时，问题很快从模型架构变成了版本、缓存、显存和数据对齐：权重明明在本地，程序仍然联网；环境看似一致，实际调用了另一套 `.venv`；控制视频能生成，车辆却在侧向相机里突然消失。
+
+这篇文章记录的就是从“理解模型”到“跑通数据”的这段距离。目标链路如下：
+
+```text
+结构化场景标注
+  -> World Scenario 控制视频
+  -> Transfer2.5 多视角条件生成
+  -> 批量生成、断点续跑与质量检查
+```
+
+这条链路里，前半段（结构化标注 → 控制视频）是确定性的几何渲染，不依赖大模型；后半段才是世界模型登场的地方。把这两段分开看，后面很多问题的定位会清晰得多。
+
+### 为什么先跑 Predict2.5，而不是直接上 Transfer2.5
+
+Predict2.5 的输入只有文本或视频，Transfer2.5 则多了控制视频、相机标定和多视角对齐。两者又共用大部分系统依赖，因此先跑 Predict2.5，能够把“环境问题”和“控制数据问题”拆开。
+
+我的顺序是：先验证权重、CUDA 算子栈和显存边界；确认基础环境没问题后，再接 World Scenario 与 Transfer2.5。后面的排障都建立在这条基线上。
+
+![Cosmos 2.5 工程链路总览：从 Predict 基线到 Transfer 多视角合成](/post5/fig-01-engineering-overview.png)
+
+*图 1：本文工程链路总览。先用 Predict2.5 建立环境基线，再接入 World Scenario 控制视频与 Transfer2.5 多视角生成。*
+
+---
+
+## 1. 环境部署：真正困难的是版本、缓存与路径一致性
+
+Cosmos 2.5 的部署问题，很多不是“缺少依赖”，而是**实际使用的环境、权重和路径与你以为的不一致**。这次最耗时间的几处故障，最后都落在这三个地方。
+
+本章以下内容均服务于研发环境的复现与排障，不应直接视为生产部署规范。
+
+### 1.1 目标环境与资源约束
+
+官方给出的系统要求是明确的 【官方文档事实】（`cosmos-transfer2.5/docs/setup.md`）：
+
+- NVIDIA GPU，Ampere 架构（RTX 30 系、A100）或更新；
+- 驱动 ≥ 570.124.06，对应 CUDA 12.8.1；
+- Linux x86-64，glibc ≥ 2.35（即 Ubuntu ≥ 22.04）；
+- CUDA 12.8 用 `--extra cu128`，CUDA 13.0 用 `--extra cu130`；DGX Spark 与 Jetson AGX 必须用 CUDA 13.0。
+
+我的宿主机是 Ubuntu 20.04，glibc 低于官方要求，因此没有在宿主机上硬装，而是直接采用官方同款 Ubuntu 24.04 / CUDA 12.8 容器环境。Python 依赖由 `uv` 管理，运行时固定使用 `cu128` extra，避免解析到另一套 PyTorch/CUDA 组合。
+
+资源边界也要说清楚 【本次实践观察】：24 GB 单卡可以完成模型加载、权重读取并进入前向流程，但在 2B 模型生成阶段 OOM，当时 PyTorch 已分配约 21.7 GB。它能用来验证链路，不能据此宣称已完成单卡视频生成。
+
+### 1.2 为什么 Predict 与 Transfer 共用镜像、隔离虚拟环境
+
+Predict2.5 与 Transfer2.5 的 Dockerfile 使用相同的基础镜像与 `uv` 版本，因此我复用了同一个系统镜像，让前后的基线测试处在同一套 CUDA 和系统 ABI 上。但两个仓库仍各自保留独立、持久化的 `.venv`，避免项目依赖互相改写。
+
+容器里只需要理清四类挂载：
+
+| 挂载项 | 容器内位置 | 目的 |
+|---|---|---|
+| 项目代码 | `/root/workspace` | 代码与配置，宿主机直接编辑 |
+| 独立 `.venv` | `/root/workspace/.venv` | 持久化 Python 环境，避免重复同步依赖 |
+| Hugging Face 缓存 | `/root/.cache/huggingface` | 权重只下载一次，容器重启不重复下载 |
+| uv 缓存 | `/root/.cache/uv` | 依赖 wheel 离线复用 |
+
+这里最关键的不是一条完整的 `docker run` 命令，而是两条约束：并行推理要提供足够的共享内存；`.venv` 必须与项目根目录保持固定关系。本文统一以 `/root/workspace` 为代码根，避免早期 `/workspace` 口径与新环境混用。路径一旦错位，`uv` 很可能静默选择另一套解释器，直到运行阶段才暴露问题。
+
+### 1.3 离线与弱网部署
+
+服务器无法稳定访问 GitHub、GHCR 和 Hugging Face，因此我采用“联网端准备、离线端复用”的方式：
+
+1. 在可联网机器上构建镜像，`docker save` 导出，服务器 `docker load` 导入；
+2. 把 `~/.cache/huggingface` 整体复制到服务器对应位置，让权重离线可用；
+3. 把 `~/.cache/uv` 整体复制过去，让依赖 wheel 离线可复用；
+4. 复制代码之前，**先删掉仓库里的 `.venv`**。
+
+第 4 条很容易被忽略：宿主机生成的 `.venv` 如果一起复制进容器，常见结果是 `flash-attn` 符号缺失，或 PyTorch 与 CUDA ABI 对不上。运行前还要清掉镜像遗留的 `VIRTUAL_ENV`，明确指定项目与缓存位置：
+
+```bash
+unset VIRTUAL_ENV
+cd /root/workspace
+export UV_PROJECT=/root/workspace
+export UV_CACHE_DIR=/root/.cache/uv
+
+# 需要装/修依赖时（离线）
+UV_OFFLINE=1 uv sync --locked --extra cu128
+
+# 日常运行：显式带 extra，且不要触发同步
+uv run --extra cu128 --no-sync python -V
+```
+
+日常运行固定带上 `--extra cu128 --no-sync`。这不是命令风格问题，而是为了防止运行时再次解析依赖、改写已经验证过的环境。
+
+#### 权重缓存的 revision 陷阱
+
+最隐蔽的问题来自权重 revision：本地明明有模型，程序仍尝试联网。原因是 `checkpoint_db.py` 请求的 revision 与缓存中的 snapshot 不一致；对 `huggingface_hub` 来说，这等同于缓存不存在。
+
+处理方式是把代码请求对齐到本地 snapshot，并让下载逻辑优先使用 `local_files_only` 【本次实践观察】。`HF_HUB_OFFLINE=1` 只能禁止联网，不能补齐缺失 revision，所以必须先核对 snapshot，再开启离线模式。
+
+#### 自检顺序
+
+我按“解释器 → PyTorch/CUDA → Cosmos 包 → `flash_attn` 等重依赖 → NCCL 多进程”的顺序检查。重点是先确认解释器确实来自项目 `.venv`，再验证真正的前向和分布式推理；仅仅 `import torch` 成功，并不能说明环境已经可用。
+
+### 1.4 最值得保留的坑
+
+最后把这次真正影响运行的几类问题收在一起：
+
+| 现象 | 根因 | 处理 |
+|---|---|---|
+| `uv.lock` 解析失败：`missing field version` | `uv` 版本与 lock 文件格式不匹配 | 把 `uv` 固定到与 lock 匹配的版本（本次为 `0.8.12`） |
+| `ModuleNotFoundError: cosmos_oss` | 未安装 `cu128` extra 对应的依赖 | `uv sync --locked --extra cu128`；运行期用 `uv run --extra cu128 --no-sync` |
+| `VIRTUAL_ENV` 指向镜像自带 `.venv` 并告警 | 环境变量继承自镜像，覆盖了项目环境 | `unset VIRTUAL_ENV` 后再执行 `uv`，并统一使用 `/root/workspace/.venv` |
+| `flash-attn` 符号缺失、torch/CUDA ABI 不匹配 | 宿主机的 `.venv` 覆盖了容器内环境 | 不挂载宿主机 `.venv`；复制代码前 `rm -rf .venv` |
+| 明明有本地权重仍联网下载直至超时 | 权重 revision 与代码请求的 revision 不一致 | 对齐 revision，并让下载逻辑优先 `local_files_only` |
+
+![研发环境中的容器挂载关系](/post5/fig-02-container-mounts.png)
+
+*图 2：研发环境中的容器挂载关系。代码、项目虚拟环境、Hugging Face 缓存与 uv 缓存分别持久化。*
+
+---
+
+## 2. Predict2.5 基线测试：先确认环境能走到哪一步
+
+Predict2.5 在本文里不是测评对象，只负责回答三个问题：离线权重能否加载、CUDA 与重算子能否完成真实前向、现有显存能把链路推进到哪一步。
+
+### 2.1 本次验证边界
+
+24 GB 单卡上，模型加载、权重读取和前向链路均能正常执行，随后在生成阶段 OOM，报错时 PyTorch 已分配约 21.7 GB 【本次实践观察】。因此这次单卡实验只能说明“环境与前向链路可用”，不能说明“单卡成功生成成品视频”。
+
+测试时我先跑 Text2World，再跑 Video2World。前者输入最少，适合检查权重、依赖和 CUDA；后者再引入视频条件，用来观察帧数、连续性以及输入视频对结果的影响。
+
+### 2.2 Text2World 与 Video2World
+
+Predict2.5 的入口是 `examples/inference.py`，参数通过 JSON 指定。最小的 Text2World 输入只需要类型、名称和 prompt：
+
+```json
+{
+  "inference_type": "text2world",
+  "name": "my_cyberpunk_demo",
+  "prompt": "A futuristic self-driving car driving on a highway at night"
+}
+```
+
+运行时固定使用已经同步好的 `cu128` 环境：
+
+```bash
+uv run --extra cu128 --no-sync examples/inference.py \
+  -i my_prompt.json -o outputs_2b \
+  --model 2B/post-trained --disable-guardrails
+```
+
+这里关闭 guardrails 只是为了隔离权限与额外显存开销，不是生产建议。正式使用时仍应把 Guardrail 权重纳入权限和缓存管理。
+
+Video2World 只需把 `inference_type` 改为 `video2world`，并增加 `input_path`。在我测试的冲突 prompt 样本中，结果更受输入视频影响；但样本数量不足，不能把它推广成模型的一般性质 【本次实践观察】。
+
+### 2.3 多卡与长视频
+
+单卡显存不足时，可以用 `torchrun` 增加 context parallelism。这里的多卡主要用于切分视频上下文、缓解单卡显存压力，并不等同于把 batch 简单铺到多张卡上。
+
+长视频则采用自回归分块：默认窗口为 77 帧，后一块继承前一块的末帧。它能把视频接长，却不能保证长时语义与画面始终稳定。接缝、颜色漂移和后段模糊仍要单独检查。
+
+<figure className="my-6">
+  <div className="grid gap-4 md:grid-cols-2">
+    <div>
+      <video className="aspect-video w-full rounded-lg border border-cyan-400/32 bg-black object-contain" controls preload="metadata" playsInline>
+        <source src="/post5/video3-01-input.mp4" type="video/mp4" />
+        当前浏览器不支持 MP4 视频播放。
+      </video>
+      <p className="mt-2 text-center text-sm text-[var(--text-muted)]">输入视频</p>
+    </div>
+    <div>
+      <video className="aspect-video w-full rounded-lg border border-cyan-400/32 bg-black object-contain" controls preload="metadata" playsInline>
+        <source src="/post5/video3-02-output-10s.mp4" type="video/mp4" />
+        当前浏览器不支持 MP4 视频播放。
+      </video>
+      <p className="mt-2 text-center text-sm text-[var(--text-muted)]">输出视频（前 10 秒）</p>
+    </div>
+  </div>
+  <figcaption className="mt-3 text-center text-sm leading-6 text-[var(--text-muted)]">
+    图 3：Predict2.5 Video2World 基线输入与输出对照。为便于页面浏览，输出只展示前 10 秒。
+  </figcaption>
+</figure>
+
+---
+
+## 3. 从 Predict 到 Transfer：生成能力与可控生成的分界
+
+基线立住之后，会遇到一个很自然的问题：既然 Predict2.5 已经能生成看起来不错的驾驶视频，为什么还要接 Transfer2.5？
+
+一段话承接上一篇技术文：Predict2.5 负责的是**生成先验**——它知道驾驶场景应该长什么样；Transfer2.5 负责的是**在给定几何与时空约束下翻译**，它把控制视频里的空间结构作为条件注入，让生成结果落回指定的骨架上。上一篇已经讲过这条分界线的技术机制，这里不再展开推导。
+
+真正需要展开的是工程上的验收标准。对自动驾驶合成数据来说，"看起来真实"是最低门槛，而不是目标。一段画面很漂亮但不能用于下游训练的视频，通常在这几个地方出问题：
+
+- **控制贴合**：生成画面里的车道线、目标位置是否与控制视频对得上；
+- **时序连续**：动态目标有没有跳变、闪烁、突然出现或消失；
+- **跨视角一致**：多路相机看到的是不是同一个世界里的同一时刻；
+- **几何正确**：相机标定与 ego 位姿不对时，模型可能在错误的骨架上生成一幅"自洽但错误"的画面，而且它不会报错。
+
+最后一条是这条链路里最危险的一类失败，也是我把它放在本篇前半部分反复强调环境与基线的原因：**当几何骨架本身是错的，模型的输出质量越高，误导性越强。**
+
+所以在 Predict → Transfer 这个转折点上，需要换掉的不只是模型，还有评价标准——从"生成得像不像"换成"条件是否被忠实执行"。而要让条件被忠实执行，第一步就是把结构化标注变成模型真正能消费的控制视频，也就是 World Scenario 控制视频。
+
+接下来的第 4—6 章就围绕这些问题展开：World Scenario 与 HDMap 到底是什么关系（这两者经常被混用，而且我认为它们不是两个同级概念）、Transfer2.5 在自动驾驶合成数据上的完整链路、以及这条链路在真实工程里暴露出来的问题。
+
+---
+
+## 4. World Scenario 与 HDMap：不是两个同级概念
+
+结构化标注必须先变成模型能消费的控制视频。这里最容易混淆的是 HDMap 与 World Scenario。
+
+**HDMap 是地图语义数据；World Scenario 是把地图、动态对象、相机与时序信息渲染成的视频条件。** 它们不在同一层，也不是两个并列的输入模态 【作者判断】。分清这一点之后，控制视频出错时才知道该查地图，还是查标定、ego motion 与时间对齐。
+
+### 4.1 官方自己的说法：World Scenario 是 HDMap 条件的改进版
+
+官方 toolkit 的 README 写得相当直接（`cosmos-drive-dreams-toolkits/README.md`，`World Scenario Rendering` 一节）【官方文档事实】：
+
+> World Scenario rendering is an improved version of the HDMap condition, introduced in Cosmos-Transfer 2.5.
+
+它列出的三点差异是：
+
+- **GPU-enabled rendering with moderngl**：渲染改用 moderngl 走 GPU；
+- **Accurate 3D occlusion and heading for bbox rendering**：包围盒渲染有正确的 3D 遮挡与朝向；
+- **Fine-grained laneline style rendering with different patterns (solid, dashed, dotted)**：车道线按实线 / 虚线 / 点线等不同样式细粒度渲染。
+
+注意这里的措辞是"improved version of the HDMap condition"，不是"另一个模态"。这一点很关键：World Scenario 并没有取代 HDMap 数据，它取代的是**旧的 HDMap 条件视频渲染方式**。
+
+### 4.2 代码层面的差异：两条渲染路径
+
+代码里有两条不同的渲染路径 【本次实践观察】。
+
+旧 HDMap 路径以二维投影为主：地图图层合并到画布后，再叠加按类别着色的二维包围盒。它没有目标间的深度关系，远处的框可能直接盖在近处目标上。
+
+World Scenario 路径则把地图、车道线、交通灯和实心三维包围盒统一交给 OpenGL 渲染。它提供深度测试、遮挡、朝向表达和更细的车道线样式。换句话说，升级的不是“有没有地图或车辆”，而是控制条件的几何表达。
+
+### 4.3 一张表：概念、数据与工程角色的对应
+
+| 维度 | HDMap（严格含义） | World Scenario 控制视频 |
+|---|---|---|
+| 本体 | 车道、车道线、道路边界、路口、横道线、停止线、交通标志等静态/准静态地图语义 | 从完整场景标注按相机视角和时间渲染出的模型输入视频 |
+| 动态对象 | 在本仓库的旧 HDMap 渲染里**也画**，但是按类别着色的 2D 线框，无遮挡、无深度 | 始终渲染 3D 实心包围盒，带遮挡、深度渐变与朝向 |
+| 所需上下文 | 地图坐标系里的几何与语义 | 还需要相机内外参、ego motion、时间戳、对象轨迹与插值 |
+| 形态 | 矢量 / 结构化地图数据 | 与各相机、各帧对齐的 MP4 控制表示 |
+| 工程角色 | World Scenario 的一个源数据层 | Transfer2.5 可直接消费的条件输入 |
+
+> **需要修正一个常见说法**：我在准备这篇时看到的一种提法是"HDMap 不含动态对象，World Scenario 才含"。这句话在**概念层面**（HDMap 作为地图数据本身当然不含轨迹）是对的，但在这个仓库的**具体渲染实现里**并不成立——旧 HDMap 条件视频同样会渲染动态包围盒，只是用 2D 线框的方式。真正稳定的区分是**渲染方式与所需上下文**，不是"有没有动态对象"。
+
+![HDMap 与 World Scenario 前视角同帧对比](/post5/compare_front_wide_hdmap_vs_ws.png)
+
+*HDMap 与 World Scenario 的前视角同帧对比；真实控制帧用于辅助理解二者在渲染表达上的差异。*
+
+### 4.4 为什么这个区分对工程有实际意义
+
+概念澄清之后，排查路径会变得很不一样 【作者判断】：
+
+- 如果**车道线位置明显偏了**，先看 HDMap 数据本身的地图精度与对齐；
+- 如果**车道线是对的、但画面里的车在闪或者突然消失**，问题在动态对象这一侧——轨迹插值、可见性判断、包围盒过滤策略；
+- 如果**整幅画面都像"贴歪了"**，那通常是相机内外参或 ego pose，跟地图数据无关；
+- 如果**多路相机各自看都还行、拼起来不是同一个世界**，那是时间对齐或跨视角一致性问题。
+
+这四条恰好就是下一章的链路，和再下一章的问题清单。
+
+---
+
+## 5. Transfer2.5 在自动驾驶合成数据上的实际链路
+
+### 5.1 输入：结构化场景标注有两种形态
+
+World Scenario 生成脚本接受 Parquet 与 RDS-HQ 两类输入 【官方文档事实，`cosmos-transfer2.5/docs/world_scenario_video_generation.md`】。前者由同一 `clip_id` 下的障碍物、标定、ego motion 和地图要素文件组成；后者是 NVIDIA 自驾数据集的原生格式，也是我本次使用的输入。
+
+真正必需的是障碍物、相机标定和 ego motion。车道、道路边界、横道线、交通灯等属于可选地图层。脚本会按相机输出对应的 MP4 控制视频，交给后续多视角推理。
+
+World Scenario 的几何渲染细节已在《Cosmos-Drive-Dreams：从结构化标签到自动驾驶世界生成》中展开，这里只关心它与 Transfer2.5 的接口。
+
+### 5.2 渲染：坐标、插值、投影
+
+这一层是确定性的几何渲染，不依赖大模型，但它是整条链路里最容易埋雷的地方。官方文档把坐标系与时间对齐写得很清楚 【官方文档事实，`docs/world_scenario_parquet.md`】：
+
+- **世界坐标系**：ego 车首帧位置为原点，右手系，X 向前、Y 向左、Z 向上；
+- **车辆参考系**：原点是**后轴中心、地面高度**，相机位置相对后轴按 FLU（Forward-Left-Up）约定给出，变换链是 world → ego → camera；
+- **时间对齐**：ego motion 和障碍物轨迹通常原生是 10 Hz，会被插值到渲染处理帧率（默认 30 fps，由 `INPUT_POSE_FPS` 配置）；地图数据是静态的，只加载一次、不插值。
+
+渲染流程本身是六步：加载相机标定 → 解析并插值 egomotion 到处理帧率 → 把障碍物轨迹插值到与 egomotion 相同的时间戳 → 把所有几何从世界坐标变换到相机坐标 → 逐帧用 OpenGL 渲染 → 编码成 MP4。
+
+我特意把这段列出来，是因为它解释了后面所有"画面看起来怪"的问题都可能有确定性来源：**10 Hz 到 30 fps 的插值、世界坐标到相机坐标的链式变换、以及场景首帧被当作 ego 位姿参考——这三件事里任何一件不对，后面模型再强也救不回来。**
+
+![World Scenario 从结构化场景输入到控制视频与生成结果](/post5/fig-04-world-scenario-input-output.png)
+
+*图 4：World Scenario 输入输出关系。结构化场景信息经几何渲染形成控制视频，再作为 Transfer2.5 的条件输入。*
+
+### 5.3 推理：从控制视频到多视角 RGB
+
+推理入口是 `cosmos-transfer2.5/examples/multiview.py`，每个相机视角由 JSON spec 描述。工程上要抓住两点 【官方文档事实 + 本次实践观察】：
+
+**一是 active view 与进程数。** 提供 `control_path` 的相机都算 active view，context parallel size / world size 不能少于 active view 数。官方默认样例启用七个视角，但示例命令以 8 进程运行，因此不能简单理解为“一个视角对应一张卡”。
+
+**二是 `num_conditional_frames`。** 没有原始视频时设为 0，模型依据控制视频和文本从头生成，而不是给已有视频换风格。
+
+本机用一个 RDS-HQ clip 成功渲染了六路 1280×704、30 fps、121 帧的 World Scenario 控制视频，并用同一 clip 生成 HDMap 对照结果 【本次实践观察】。单视角侧还完成了多种天气与时段的 prompt 改写实验。
+
+性能方面只引用官方口径：Transfer2.5-2B 单卡推理标注需要 65.4 GB 显存 【官方文档事实，`docs/inference.md`】。这个数字与前文 24 GB 显卡上的 Predict2.5 OOM 实测不是同一个模型，也不是同一来源。
+
+![Transfer2.5 自动驾驶多视角生成结果](/post5/fig-05-transfer-multiview-result.png)
+
+*图 5：Transfer2.5 多视角生成结果。不同相机视角在同一时刻共同描述一个驾驶场景。*
+
+### 5.4 批处理：重点是可恢复，不是容器细节
+
+单条 clip 跑通以后，批处理最重要的能力是中断后继续，而不是让某个进程“永远不掉”。这部分与 Docker 本身关系不大，因此不展开容器常驻、`nohup` 和日志命令。
+
+我的续跑规则很简单：
+
+- 目标目录已有同名且非空的 MP4：记为 `SKIPPED`；
+- 只有中间 JSON、没有 MP4：视为未完成，重新执行；
+- 每条任务结束后立即追加 CSV 记录，保存时间、样本、天气、状态与错误摘要。
+
+这样一来，进程在哪个容器里启动并不重要；任务状态由输出文件和清单决定。长任务真正需要的是幂等、可审计和可重入。
+
+---
+
+## 6. 结果之外：这条链路真正暴露的问题
+
+链路跑通后，问题主要集中在几何渲染、标定、时序和多视角资源四处。它们有个共同点：模型往往不会报错，只会把错误条件生成得更像真的。
+
+### 6.1 近距离车辆：一个过于保守的可见性判断
+
+侧向相机里，近距离切入车辆有时会突然消失。问题不在模型，而在控制视频的包围盒过滤：旧逻辑要求角点全部满足可见条件，部分出画的近车因此被整体丢弃。
+
+我把保留条件改为“所有角点深度为正，且投影后的二维外接矩形与画布相交” 【本次实践观察】。这项修改只影响渲染侧，不改标注、权重和推理逻辑；同时保留官方脚本作为可回退基线，避免以后无法解释本机结果与官方结果的差异。
+
+![近距离车辆包围盒过滤修复前后对比](/post5/fig-06-close-vehicle-before-after.png)
+
+*图 6：近距离车辆包围盒过滤修复前后对比。新判断会保留部分出画、但仍与画布相交的目标。*
+
+### 6.2 相机与标定：错了不报错，只是生成得很自信
+
+相机标定或 ego pose 错了，程序往往不会报错，只会渲染出错误的几何骨架。我遇到过同一类内参键名有时带 clip 前缀、有时不带的情况，临时增加了严格的后缀匹配：只匹配到一条才使用，多条则直接报错。
+
+这类修补解决的是数据规范，不是模型能力。控制视频一旦错位，模型仍可能生成一幅视觉上自洽的画面；质量越高，错误越难察觉。
+
+### 6.3 时序一致性：先抖的是控制视频，不是模型
+
+动态对象的轨迹插值里有一个容易忽略的细节：当某个中间帧缺失、需要向前寻找下一帧时，如果已经到达序列末尾，原始实现会**复用上一帧插值后的结果**。这看起来没问题，但插值结果本身是由邻帧构造出来的，再拿它当基准继续往后传，误差会沿时间轴累积，尾部容易出现位置漂移或抖动。
+
+本地把这里改成了**复用最近的上一帧原始信息**，而不是插值结果。改动只有一行，但性质完全不同：一个是"用推导值继续推导"，一个是"回落到原始观测"。
+
+**这件事让我形成了一个排查习惯**：如果生成视频里动态目标抖动、闪烁或者突然出现消失，我**先去看控制视频**，而不是先怀疑模型。控制视频是先产生的、确定性的、可逐帧检查的；模型是最后的黑箱。顺序反过来查，会把大量时间浪费在模型侧。
+
+### 6.4 多视角与资源约束
+
+官方要求 CP / world size 不少于 active view 数，七视角样例使用 8 进程。少卡时可以减少 active view，但这也会削弱多视角一致性测试的意义。
+
+社区的单卡或少卡改动适合验证流程，不适合当作官方复现或生产基准。结合官方 65.4 GB 的单卡显存口径，生产部署仍应按大显存 GPU 或多卡规划；“能把流程跑起来”和“能稳定生产数据”是两回事。
+
+### 6.5 输出质量门禁：这类数据不能只看"像不像"
+
+生成完成不等于数据可用。为了把问题定位回控制、时序、视角或生成本身，我建议把下面这张门禁清单作为这条链路的固定验收项【作者判断】：
+
+1. **控制贴合**：生成画面里的车道线、目标位置与控制视频是否对得上；
+2. **动态对象连续性**：有没有跳变、闪烁、凭空出现或消失；
+3. **跨视角一致性**：多路相机是不是在同一个世界的同一时刻；
+4. **长视频接缝**：自回归分块拼接处有没有画面跳变或语义漂移；
+5. **明显生成伪影**：纹理崩坏、结构扭曲、物体变形；
+6. **几何可信度**：标定与 ego pose 是否可信——这条不通过，前面五条都没有意义。
+
+---
+
+## 7. 小结：模型只是数据链路的一段
+
+跑完这条链路后，我对 Transfer2.5 的定位反而更具体了：它负责最后一跳，在给定几何与时空约束后生成视觉内容。HDMap、相机标定、ego pose、动态对象轨迹和跨视角时间对齐，才决定这批数据是否可信。前面的条件一旦错了，模型只会把错误包装得更真实。
+
+这次实践最终留下的排障顺序是：**先立基线，再接控制，最后批量化。** 用 Predict2.5 排除环境问题，用单条 clip 验证控制链路，再扩大生成规模。训练与后训练、World Scenario 的完整渲染实现，以及合成数据进入下游训练后的收益，都留给各自独立的文章。
+
+---
