@@ -1,0 +1,334 @@
+---
+title: "Cosmos 2.5 技术系列（三）：从 AV2 数据适配到多视角后训练"
+description: "以 Argoverse 2 七视角为例，记录 Cosmos-Transfer2.5 的传感器配置适配、控制语义修正与四条后训练路线，并用 origin、base、LoRA 多视角对照展示固定样本上的构图与结构变化。"
+date: "2026-10-21"
+author: "Nova & Atlas"
+tags: ["cosmos2.5", "cosmos-transfer2.5", "post-training", "lora", "argoverse2", "autonomous-driving", "multiview"]
+---
+
+> 这是 Cosmos 2.5 系列的第三篇，也是这一阶段的收尾。第二篇解决的是「能不能生成」：怎么把 Transfer2.5 接进自动驾驶合成数据链路，怎么让控制视频、相机标定和多视角对齐同时成立。这一篇进一步关注：**当目标数据使用不同的传感器配置时，如何通过数据映射与后训练，让生成结果适应目标相机的构图和视场关系，同时改善控制贴合。**
+>
+> 本博客以公开数据集训练微调为样例展开，实际本文方法具有一定工程化能力。
+>
+
+---
+
+## 1. 问题与基线
+
+第二篇结束时，链路已经跑通：给定一批 Argoverse2数据集 （以下简称AV2） 结构化标注，渲染出 `world_scenario` 控制视频，再由 Transfer2.5 生成七个视角的视频。但把它当作可用的数据生产工具之前，有三个问题绕不过去：
+
+1. **相机布局**：AV2 的七个 ring camera 与 Cosmos 原生七视角不是同一套相机。生成画面是否与目标相机布局存在系统性偏差？
+2. **局部扭曲**：官方模型直接接收 AV2 控制输入时，路口、路边车辆、道路边界附近会出现结构性错误。
+3. **控制贴合**：控制视频画出的车道线、可行驶边界、车辆位置，在生成视频中能保持多少？
+
+先做过的是推理侧扫描。同一 checkpoint、同一样本集、同一 seed 下试过几组 `guidance` 与 `control_weight`：`control_weight` 的修改可以小幅提高控制贴合但部分样本出现轻微噪声，`1.5/2.0` 噪声更明显；`guidance=5` 相对 `3` 的画质差异不明显【记录观察】。调参观察不足以回答上面三个问题，因此改动转向数据、控制语义与训练参数范围。
+
+正式实验全部围绕 AV2 七视角：**600 个 AV2 Sensor `train` log、7 视角、10 FPS、704×1280**（早期 Waymo 五视角只用于验证链路，见第二篇）。
+
+本次后训练有三个目标：**传感器配置适配**（让各 slot 的画面构图与目标相机朝向、视场和裁剪关系相符）、**控制适配**（更严格执行 `world_scenario` 的结构约束）与**地域风格适配**（更接近 AV2 城市的外观分布，但这一点需要做一次数据聚类，会在后续cosmos3的文章中详细说明）。第一项是训练动机本身：填好七个输入 slot 只完成了接口适配，还需要检查模型是否沿用原来的相机分布先验。§5.2 用 origin、base、LoRA 的七视角对照展示这一点。把这些目标对应到不同参数范围是四条路线的**设计动机**，不是已验证的参数来源分解；是否存在交叉影响，正是 §5.4 的问题。
+
+---
+
+## 2. 把 AV2 变成可训练的数据：重点是对齐与语义
+
+数据这一节占的篇幅最多，因为数据阶段的对齐与语义会直接进入训练信号。
+
+![AV2 到 Transfer2.5 数据流程](/post6/FIG1_DATA_PIPELINE.svg)
+
+*图 1｜项目数据流程。控制视频独立渲染。*
+
+
+### 2.1 为什么不用官方 parquet 中间格式
+
+**【官方规范】** Transfer2.5 的多视角后训练数据是按相机名分目录的 MP4 集合：`videos/`、控制视频目录、`captions/` 按文件名对齐。AV2 的 ring camera 是 pinhole 相机，走 parquet 路径要额外拟合 FTheta 并落一份中间数据。本项目改为在内存中构造 SceneData、直接调用官方 renderer，把 pinhole 内参拟合到 FTheta 近似（但直接按pinhole训练也是可以的）。这是**项目改动，不是官方规范**：代价是投影近似误差，收益是RGB处理与控制渲染共用裁剪规则及对应内参，少一个几何错配来源。
+
+构建产物是自包含目录：
+
+```text
+train_transfer25_v4_600_selfcontained/
+├── videos/<camera>/<log_id>.mp4
+├── control_input_world_scenario/<camera>/<log_id>.mp4
+└── captions/<camera>/<log_id>.json
+```
+
+**规模【记录规模，非逐文件统计】**：600 个 log × 7 视角，按目录规范应有 4200 组 RGB、4200 组控制视频、4200 份 caption；分辨率 704×1280、10 FPS。这个乘数是按设计应有量，只对 20-log 构建设置做过抽查（单个 clip 实测 155–159 帧，约15.5–15.9秒），并未对 600-log 目录逐文件计数。dataloader 每次采样 29 帧窗口，不整段送进网络。
+
+### 2.2 七视角映射：七个 slot 不等于七台等价相机
+
+Cosmos 七视角有固定的相机语义（前广角、前长焦、左右侧前、左右后、后长焦），AV2 只有七个 ring camera。正式训练的映射如下：
+
+| Cosmos 视角 | AV2 来源 | 处理方式 |
+|---|---|---|
+| `camera_front_wide_120fov` | `ring_front_center` | 按目标比例中心裁剪后缩放 |
+| `camera_front_tele_30fov` | `ring_front_center` | `crop_scale=0.7` 窄裁剪 |
+| `camera_cross_right_120fov` | `ring_side_right` | 中心裁剪缩放 |
+| `camera_rear_right_70fov` | `ring_rear_right` | 中心裁剪缩放 |
+| `camera_rear_tele_30fov` | `ring_rear_left` | `crop_scale=0.7` 近似正后长焦 |
+| `camera_rear_left_70fov` | `ring_rear_left` | 中心裁剪缩放 |
+| `camera_cross_left_120fov` | `ring_side_left` | 中心裁剪缩放 |
+
+三个限制：
+
+- AV2 **没有**前向长焦，也没有正后方中心相机：`front_tele` 与 `rear_tele` 都是从广角相机裁出的视场近似，不是新的光学通道，分辨率与畸变特性不同于原生长焦。
+- `ring_front_center` 纵向视野很大，为避免横纵变形只能按目标比例中心裁剪。
+- 因此**七个 slot 被填满，不等于恢复了官方相机标定**，也不等于七台相机在几何上等价。
+
+这也解释了为什么还要训练：数据适配器规定了目标相机的输入表达，后训练则尝试让生成模型适应这套表达。对于本文，目标是当前 AV2 映射下的视角和构图适配；没有实验表明它能自动适应任意新增相机、任意标定或未见过的传感器配置。
+
+控制视频与 RGB 用同一套裁剪规则和裁剪后内参渲染，目的是减少系统性偏移：若几何来源不一致，模型可能学到「控制图整体偏一点」这种伪规律，而它在人工评审里很难与「控制贴合不好」区分。共享只保证裁剪窗口与内参对应一致，不保证投影精确——pinhole 到 FTheta 是 256 点采样的五阶多项式拟合，焦距取 `fx`、`fy` 均值；这部分误差是项目改动的固有代价。
+
+### 2.3 控制图语义修正：地图里有的，不等于图像里看得见的
+
+这是本次数据工作中直接改变训练信号语义的一项改动。
+
+早版本的 `world_scenario` 直接把 AV2 HD Map 的 lane topology 画成控制线。问题在于：**HD Map既包含拓扑关系，也包含标线属性；拓扑连接不等于真实涂装标线**——路口内大量 lane segment 之间的连接边在图像里没有对应漆线，画出来等于告诉模型「这里有一条线」。训练信号因此混合了图像与地图两种语义。
+
+修正分两步【已验证事实】：
+
+- **`official_visible_v1`**：只保留可绘制的路面标线类型——白/黄 × 实线/虚线/双实线/实虚组合共 10 类映射；对相邻 lane 共享的边界做几何去重（按 5 cm 量化后做方向无关的键去重），避免同一条线被画两遍。副作用是**道路边缘消失了**：可行驶区域的外边界不是标线类型，过滤时被一并删掉。
+- **`official_visible_v2`**（正式训练使用）：在 v1 基础上从 `drivable_areas` 多边形恢复道路边缘——先对所有可行驶区域做并集（dissolve），取外环与内环（hole）作为 `road_boundary`，几何来自区域边界而非标线枚举。
+
+判据可以概括为：**控制视频的条件语义是「图像中可见的结构」，不是「地图中记录的拓扑」**——前者是生成模型的输入，后者是规划器的输入，共享几何来源但表达方式不同。
+
+下面的同帧对照展示 v1 与 v2 的区别，重点是恢复道路边缘。
+
+![原始 RGB 与 v1、v2 控制图](/post6/FIG2_CONTROL_V1_V2.png)
+
+*图 2｜AV2 同一 log、front-wide 视角的第 60 帧：RGB、official_visible_v1、official_visible_v2。后两者展示恢复道路边缘后的差异；此图不作为 legacy 拓扑线删除的直接对照。数据来源：[Argoverse 2](https://www.argoverse.org/av2.html)。*
+
+
+### 2.4 控制图覆盖范围：哪些是数据源限制
+
+修正语义后仍有一批元素画不出来。下表限定为本项目当前适配读取的字段，不概括 AV2 的全部潜在用途：
+
+| 元素 | 当前适配读取的数据 | 当前控制视频 |
+|---|---|---|
+| 白/黄、实/虚车道线 | 有 | 已渲染（10 类标线映射） |
+| 可行驶区域道路边缘 | 有（区域多边形） | 已渲染（v2 起） |
+| 人行横道 | 有（两条边 + 多边形化） | 已渲染为区域 |
+| 车辆、行人、骑行者 | 有 3D cuboid | 按类别渲染 |
+| 路牌、STOP、bollard、锥桶 | 有 3D cuboid | 作为通用 `Other` cuboid 渲染 |
+| 路面箭头、文字、停止线 | 当前适配未提供 | 未渲染 |
+| 交通灯位置与红黄绿状态 | 当前适配未提供 | 未渲染 |
+| 普通灯杆、交通灯杆、路牌杆 | 当前适配无通用杆类 | 未作为 Pole 渲染 |
+
+这张表决定了解读下限：某个要素不在控制图里时，生成画面即使画错，也**不能用来衡量模型对该条件的遵循程度**——那属于输入条件缺失。画面合理性仍可评审，但本项目没有单独评估；交通灯状态与路面箭头不参与本文的对错判断。
+
+### 2.5 caption：scene-level 生成
+
+caption 由 Cosmos3-Nano 生成，只读 front-wide 参考视角，产出一条 scene-level 描述，同一 clip 七个视角共用；dataloader 再按视角追加固定前缀（例如前广角为 `The video is captured from a camera mounted on a driving car. The camera is facing forward.`）【已验证事实】。
+
+下面这条是 caption 生成产物的真实记录（log `00a6ffc1-6ce9-3bc3-a060-6006e9893a1a`，`camera_front_wide_120fov`，逐字摘录；该 log 属于 AV2 `train` 子集）。字段名与结构照原样保留：
+
+```json
+{
+  "caption": "A sunny day along a multi-lane urban street with moderate traffic. The ego vehicle follows a red bus in the right lane, passing a speed limit sign and roadside activity near an intersection. Pedestrians are visible on the sidewalks, and other vehicles are present in adjacent lanes.",
+  "text": "A sunny day along a multi-lane urban street with moderate traffic. The ego vehicle follows a red bus in the right lane, passing a speed limit sign and roadside activity near an intersection. Pedestrians are visible on the sidewalks, and other vehicles are present in adjacent lanes.",
+  "caption_source": "cosmos3_nano_reasoner",
+  "caption_scope": "scene_level_shared_across_views"
+}
+```
+
+样例只代表生成产物的格式与粒度，未核验它是否为5000 iter运行实际读取的文件，也未逐份统计600-log caption。描述内容未重新对照视频核实，不将模型文字视为场景真值。
+
+约束比内容更重要：不写相机名、视角名、标注格式、模型名；不描述只有单一视角才看得见的东西（七视角共用一条 caption）；不写没有视觉依据的地域风格词。第三条来自 MIA 实验：221 个样本追加固定风格前缀后风格未稳定变化，跨相机偏色先出现（见 §5.3）。**固定风格前缀在本次实验中没有稳定收益**，但不能推广成「caption 无法影响风格」。
+
+ps: cosmos3在训练时的caption标签的方式与2.5不同。
+
+---
+
+## 3. 到底训练了什么：四条路线与起点
+
+先把模型拆成两个部分，因为术语在这里最容易出错。
+
+- **基础 DiT 分支**：视频生成主干，承载外观、纹理、光照、相机视角与通用场景先验。
+- **Control/VACE 分支**：编码并注入 `world_scenario`，决定道路、车辆、车道等结构信息对画面的约束程度。
+
+**【官方流程与本地实现】** 标准 Transfer control post-train 会在 `freeze_base_model()` 中冻结基础 DiT，只解冻并完整训练 Control/VACE 参数。因此项目早期所说的「全量微调」，准确说法是 **Control/VACE 分支全参数后训练**，不是整个 DiT + Control 的全参数微调。这决定了「谁变了」的答案。
+
+四条路线的参数范围、起点与训练长度：
+
+| 路线 | 初始化 | 更新参数 | 数据与步数 |
+|---|---|---|---|
+| Control 后训练 | 官方 Transfer2.5 multiview 权重 | Control/VACE 全参数；基础 DiT 冻结 | 600 log，5000 iter |
+| Hybrid LoRA | 5000 iter Control 模型 | 基础 DiT attention LoRA（rank/alpha 16，lr 5e-5）+ Control 继续训练（lr 5e-6） | 600 log，500 / 1000 iter |
+| MIA 风格 LoRA | 5000 iter Control 模型 | 基础 DiT attention + MLP LoRA（rank/alpha 32，lr 5e-5）；Control 冻结 | 221 个 MIA 样本，1500 iter，caption 加固定风格前缀 |
+| Direct LoRA | 官方 Transfer2.5 multiview 权重 | 基础 DiT attention LoRA（rank/alpha 16，lr 2e-5）；Control 冻结 | 600 log，3000 iter |
+
+四条路线是一条线索上的四个分叉：Control 后训练用官方流程做控制适配；Hybrid 在 5000 iter 模型上同时轻推生成主干；MIA 单独检验固定风格文本条件；Direct 从官方权重直接做 LoRA，看轻量域适配本身能到什么程度。
+
+**必须强调：这四条路线不是单变量消融。** 它们在初始化 checkpoint、训练数据（其中一条只用了 221 个样本、且 caption 被改写）、学习率、训练步数上同时存在差异。任何「A 比 B 好所以是 X 起作用」的推断都不成立；本文只做「参数范围 → 现象」这一层的对应。
+
+LoRA 只注入基础 DiT 的 attention（`q_proj/k_proj/v_proj/output_proj`，MIA 另加 `mlp.layer1/layer2`），配置显式排除 `control_blocks`、`control_embedder`、`input_hint_block`、`after_proj` 及 control 侧 embedder【已验证事实】。**Control 分支本身没有 LoRA**，这是当前实现边界：这条路线「理论上可以设计，但当前没有实现和验证」。
+
+参数量的量级：对一个 `d×k` 的线性层注入 rank-`r` 的 LoRA，增量参数量是 `r(d+k)`；把所有被适配的投影层加起来，Direct LoRA 的可训练参数是 **13,762,560**。以名义 2B 参数量作分母，约 0.69%。这个比例只用于说明量级，本文没有做逐层维度求和核对；能逐字对照的是下面的日志审计。
+
+---
+
+## 4. 让训练可信：运行、审计与恢复
+
+### 4.1 实验卡
+
+- 硬件：B200 × 8；
+- 并行：`context_parallel_size=8`，数据并行度为 1；
+- 本地 dataloader 配置 `batch_size=1`；
+- 分辨率 704×1280、10 FPS、29 帧采样窗口；
+- 稳定后每 iter 约 10 秒（Control 后训练、Hybrid、MIA 三组读数接近）；日志末段单步耗时分别约为：Control 10.1 s、Hybrid 10.4 s、MIA 9.6 s、Direct 42.7 s。
+
+### 4.2 用参数审计代替配置意图
+
+配置写的是「训练 LoRA」，启动审计说明「哪些参数被设为可训练」。最典型的不一致是 LoRA 注入后又被冻结逻辑覆盖：训练照常进行、loss 照常下降，而 LoRA 没有学习。
+
+所以每次启动都做一次强制审计。审计写在 `freeze_base_model()` 内部，不只是打印，还会在出现意外可训练参数时直接抛错：一旦发现非 LoRA、非 Control 的可训练参数，或 `train_control_branch=False` 却仍有 Control 参数可训练，训练会当场失败【已验证事实】。这比事后看配置可靠。
+
+Direct LoRA 的实际启动输出（逐字摘录）：
+
+```text
+[pre_lora_audit] Pre-LoRA checkpoint loaded: matched=861/861 (100.0%), missing=0, unexpected=0, incorrect_shapes=0
+[lora_parameter_audit] Base-DiT LoRA trainable parameter audit: base_lora=13,762,560, control=0, total=13,762,560
+```
+
+**起点的证据要联合看【已验证事实】**：启动日志记录的加载目标与启动参数均指向官方 Transfer2.5 multiview 权重，随后输出 `matched=861/861`。加载目标与匹配结果共同支撑起点判断；匹配数说明 861 个键与形状全部命中。
+
+匹配数只证明键与形状覆盖，不单独证明权重来源；本文未做权重文件哈希比对。
+
+参数审计行确认可训练参数均属LoRA增量、Control为0，把「冻结 Control、只训 DiT LoRA」从配置里的一句话变成可核对数字。
+
+### 4.3 三个真正卡住过的工程问题
+
+1. **DTensor 加载**：普通 checkpoint tensor 与 FSDP 分片参数类型不匹配，最终在 `checkpointer.py` 做类型对齐，保留 CP=8。
+2. **冻结与 LoRA 的先后关系**：`freeze_base_model()` 先冻结全部参数，再按配置启用 Control、按 `train_control_branch` 重新冻结、最后解冻 LoRA 并审计；判断依据是 `requires_grad` 与 optimizer 参数组。
+3. **自动 resume**：同名 job 在本项目配置下会继承上次 checkpoint；正式实验使用独立输出目录，并区分「只加载 `model`」与「加载训练状态」。
+
+### 4.4 中断与恢复
+
+Direct LoRA 在约 2110 iter 收到外部 `SIGTERM`，从最近一个完整 checkpoint（1800 iter）恢复，最终正常跑完 3000 iter。此处依据日志确认中断、恢复和最终完成，不据此判断泛化或生成质量。
+
+CP=8 下部分 rank 的局部 loss 显示 0.0000，这是并行切分的结果，不是全局 loss 为 0。趋势一律看 `global_avg` 与 `ema`。
+
+![四条训练路线的日志 loss 曲线](/post6/FIG3_LOSS_SMOOTH_V6.png)
+
+*图 3｜由训练日志实际采样点绘制。粗线为日志 EMA 的居中 11 点移动平均（约 100 iter 跨度，端点使用可用点），淡线保留日志 EMA 与 global_avg；各日志段独立平滑，缺口不连接，Direct 两次运行不拼接、不平均。平滑只用于观察趋势，loss 不用于生成质量排名。*
+
+
+以下为日志 EMA 读数：
+
+- **Control 后训练**：EMA 从 iter 70 的约 0.089 降到 5000 iter 的约 0.066，中间在 0.060–0.094 区间波动。
+- **Hybrid LoRA**：两段日志分别覆盖 320–500 与 570–1000。前段 EMA 0.074 → 0.078，后段 0.073 → 0.073，两段都在 0.055–0.084 区间内波动，阶段末读数与阶段初接近。
+- **MIA 风格 LoRA**：EMA 在 0.062–0.088 之间波动，1500 iter 末值约 0.085。
+- **Direct LoRA**：attempt A 从 0.094（iter 70）降到 0.074（iter 2110）；attempt B 从 0.077（iter 1870）降到 0.067（iter 3000），2400 iter 之后在 0.063–0.082 之间波动。
+
+**两个 attempt 的曲线不能接成一条**：恢复运行从1800 checkpoint重新推进，与原运行在重叠步数上是不同轨迹；拼接 1870–2110 会造出不存在的连续性。
+
+Direct LoRA 末段 EMA（约 0.067）与 Control（约 0.066）接近，但参数集合不同：一个只更新约 0.69%、Control 冻结，另一个训练整个 Control 分支。loss 是不同参数化下的拟合读数，不能当成生成质量排名。
+
+---
+
+## 5. 训练后改善了什么，又没有改善什么
+
+这一节的主语是「固定样本上的现象」，不是「模型能力」。可用的证据形式只有一种：人工看画面。所有结论都带这个前提。
+
+### 5.1 评估协议与它的边界
+
+评审集是同一批 **10 个 AV2 `validation` log**、七个视角，四组同步播放：原始 RGB（真实参考）、官方基础模型、5000 iter Control 后训练、3000 iter Direct LoRA。后三组是生成方法，第一组是真实数据，用于避免「两个都错但错得一样」的误判。
+
+推理参数必须写清哪些是日志实证、哪些只是记录：
+
+- **seed=0**：三组保留结果各自的 `inference.log` 都记录了 `Using random seed 0.`，这是日志级证据。
+- **`guidance=5`、`control_weight=1.0`**：来自实验结果整理时的记录；本次复核没有在 inference 日志里找到这两个参数的打印行。
+- **采样步数**：三组 inference 日志中都没有出现采样步数的运行值，因此本文不把任何固定步数写成协议的一部分，这一项按待核实处理。
+
+这批样本的历史要交代清楚，否则「held-out」会被滥用：
+
+- 验证池是 **20 个 AV2 `val` log**，正式对照保留排序靠前的 **10 个**；
+- 这 10 个 log 不在正式 600-log `train` 数据里，但 `02678d04-…`、`02a00399-…` 出现在早期 50 iter smoke 的 log 清单中，而那批训练目录来自 `val` 子集；相机 profile 调试与 `2000/3000/4000/5000` checkpoint 取舍也用过这批样本。
+
+因此本文统一称它们为 **validation 样本**，不称 test 集，也不写「从未接触过」。早期 smoke 与主 baseline 的 checkpoint 血缘没有完整追溯，文中不做推断。
+
+### 5.2 主对照：谁改善了哪一项
+
+![各视频第 5 帧的四组效果对照](/post6/FIG4_FOURWAY_FRAME5_V9.png)
+
+*图 4｜同一 AV2 validation log（02a00399…）、front-wide 视角，各视频开头第 5 帧（从 1 计数，索引 4）。原始 RGB、官方模型、Control 5000 iter、Direct LoRA 3000 iter；三组生成结果 seed=0。按各文件帧序号选取，不据此保证源时间戳严格对齐；静帧用于观察局部结构，不用于判断时序和跨视角一致性。数据来源：[Argoverse 2](https://www.argoverse.org/av2.html)。*
+
+
+
+
+
+下面先保留既有十个 validation log 的人工评审结论，再对图 5 的单个场景补充直接可见的多视角观察；后者不代表重新评审了全部样本：
+
+**清晰度与整体稳定性。** 官方基础模型直接接收 AV2 控制输入时扭曲最明显，尤其路口与路边停车区域。5000 iter Control 后训练改善最直接：画面更干净、结构连续性更好；记录同时称 `4000/5000 iter` 明显优于 `2000 iter`，`4000` 与 `5000` 接近。**【视觉观察】**
+
+**相机布局。** 训练后的七视角构图更接近 Argoverse v4 映射。这不等于标定被恢复：映射本身是裁剪近似，改善的是模型对这套近似映射的适应。**【视觉观察】**
+
+**控制贴合。** 记录将3000 iter Direct LoRA评为当前固定样本中控制贴合最好的一组。Control后训练相对官方模型也有改善，但局部车辆、边界与拓扑细节仍可能偏离。此处不新增未经逐帧核对的部位细节。**【视觉观察】**
+
+**风格变化。** 两组训练模型相对官方模型都只有小幅变化，没有形成稳定、强烈的地域迁移；Direct LoRA 与 Control 后训练之间的差异也不明显。**【视觉观察】**
+
+偏差例子应在选帧后标注，而不是先写结论：控制图给了结构，模型仍可能没有完全跟上；本次评审没有逐帧标注，无法给出偏差分布。
+
+#### 多视角对照：适配的是相机构图与视场关系
+
+只看 front-wide，容易把训练收益理解成画面更清晰。下面按 **origin（真实参考）→ base（官方模型）→ LoRA（Direct LoRA）** 的顺序，依次展示作者从对比工具截取的三张七视角画面。图片保留截图原貌，不再重新取帧或拼图。
+
+布局按相机朝向排列：第一行只有居中的前长焦，两侧留空；第二行为左侧、前广角、右侧；第三行为左后、后长焦、右后。位置表示视角组织关系，画面未经全景拼接，不表示相邻图像的边缘应连续。
+
+![origin：作者提供的七视角真实参考截图](/post6/FIG5_ORIGIN_USER_V11.png)
+
+*图 5a｜origin，作者提供的对比工具截图（pic5-1.png）。真实参考按 §2.2 的目标映射处理，不是未经处理的原始传感器图像。前长焦来自前中相机窄裁剪，后长焦由左后相机窄裁剪近似。数据来源：[Argoverse 2](https://www.argoverse.org/av2.html)。*
+
+![base：作者提供的官方模型七视角截图](/post6/FIG5_BASE_USER_V11.png)
+
+*图 5b｜base，作者提供的官方模型结果截图（pic5-2.png）。*
+
+![LoRA：作者提供的 Direct LoRA 七视角截图](/post6/FIG5_LORA_USER_V11.png)
+
+*图 5c｜LoRA，作者提供的 Direct LoRA 结果截图（pic5-3.png）。*
+
+
+### 5.3 负结果：两条没有走通的路线
+
+**Hybrid LoRA（500 / 1000 iter）没有观察到稳定的额外收益。** 以 5000 iter Control 模型为起点，基础 DiT 加 rank-16 attention LoRA（lr 5e-5），同时以 5e-6 继续训练 Control。记录称少量局部扭曲有所减少，但风格与控制精度没有稳定收益，因此按计划停止。
+
+「LoRA 没训起来」可以被排除：LoRA-B 共 224 个 tensor 全部产生非零更新，平均 norm 约 0.198。这只证明参数参与了更新，不构成「收益为零」的定量证明，结论仍限定为「这种组合在本数据上未观察到稳定收益」。
+
+**MIA 风格 LoRA（1500 iter）产生了不可接受的回归。** 同一 5000 iter 起点，只用 221 个南佛罗里达样本，attention + MLP 都加 LoRA（rank/alpha 32，lr 5e-5），Control 冻结，caption 追加固定风格前缀。1500 iter 后没有形成稳定的地域风格变化；从约 500 iter 起出现**前视偏红/品红、后视偏绿/青的跨相机颜色偏差**，持续到训练结束。
+
+跨相机偏色被本项目视为不可接受回归，因此排除该checkpoint；这是人工评审标准，没有下游收益实验证据。本轮未重评画面，历史视频未保留。
+
+失败解释（**【待验证假设】**）：AV2 各城市都在美国境内，基础视觉域差异有限；221 个样本加一条固定风格前缀，不足以替代多样的地域视觉数据。要验证明显地域迁移，应换视觉域差异更大的数据，而不是继续强化同一个风格词。
+
+**因此不能写成「LoRA 无效」。** 准确表述是：两种「从 5000 iter Control 模型继续做 LoRA」的方案没有稳定收益；「从官方模型直接做 LoRA」在当前固定样本上取得了最好的控制贴合，但风格收益仍然有限。这是三个不同的结论。
+
+### 5.4 一个需要克制的讨论：冻结 Control 为什么还能改善控制
+
+Direct LoRA 的 Control 可训练参数为 0（§4.2 已审计），却在控制贴合上评价最好。这看起来矛盾，实际是**当前实验无法区分机制**。
+
+至少有三个候选解释：基础 DiT 学会了更好地解释同样的控制 token；LoRA 主要适配 AV2 外观与相机分布，间接减小控制到画面的映射误差；冻结的 Control 分支与 AV2 控制图存在域差，由基础 DiT 的适配部分补偿。三者都能解释「控制变好」，而当前比较——单 seed、固定样本、无消融、无表征分析——无法区分它们。**【待验证假设】** 后续可固定 Control 特征、只换 LoRA 权重，观察控制 token 到画面的注意力分布。
+
+---
+
+## 6. 实验边界与系列收尾
+
+结论按可信度分三层：
+
+**已验证事实**：AV2 七视角数据可构造成 Transfer2.5 可训练的自包含数据集；控制图语义可从「路网拓扑」修正为「可见结构」；四条路线的参数范围与起点有记录，历史权重血缘尚未追溯；Direct LoRA 的可训练参数为 13,762,560，Control 为 0；四组训练在 B200×8、CP=8 上完成，Direct LoRA 含一次 SIGTERM 中断与恢复。
+
+**视觉观察（固定样本、单 seed）**：Control 后训练改善了清晰度与相机布局；作者提供的七视角截图用于展示构图，未核实三图的场景与时刻对应关系，不用于单独证明适配收益；Direct LoRA 在既有固定样本评审中控制贴合最好；两者风格变化都有限；Hybrid 未观察到稳定额外收益；MIA 风格 LoRA 出现跨相机偏色。这些观察来自人工评审，样本量 10 个 validation log，无量化指标，也无多 seed 复现。
+
+**待验证假设**：冻结 Control 仍改善控制的具体机制；Direct LoRA 的控制优势能否在更多样本与不同 seed 下保持；地域风格迁移是否需要换数据域而不是加 iter；Direct LoRA 的每 iter 开销为何约为其他三组的四倍。
+
+
+下一步不是加大 iter。记录认为 `4000–5000 iter` 已是当前 Control 后训练的有效区间，但这只是单条路线的记录，不能推导普遍收益曲线；更优先的是补评估，再引入视觉域差异更大的数据。这是本系列在训练侧的收尾：**链路已有运行记录，模型结论仍需更独立的评估支撑。**
+
+---
+
+---
+
+## 参考资料
+
+本文的训练数值和视觉观察来自作者的实验；项目改动均在正文单独说明。官方接口与数据背景可参阅：
+
+- [Cosmos-Transfer2.5 多视角后训练文档](https://github.com/nvidia-cosmos/cosmos-transfer2.5/blob/main/docs/post-training_auto_multiview.md)：数据目录、训练及 checkpoint 转换流程。
+- [Cosmos-Transfer2.5 官方仓库](https://github.com/nvidia-cosmos/cosmos-transfer2.5)。
+- [Argoverse 2 官方数据集说明](https://www.argoverse.org/av2.html)：传感器布局、数据与地图背景。
